@@ -1,0 +1,19 @@
+# CMake 构建产物
+build/
+
+# opencode 工具内部数据
+.omo/
+
+# 编译产物
+*.o
+*.a
+*.so
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+
+# Qt
+*.pro.user
+*.autosave
