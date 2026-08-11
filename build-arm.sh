@@ -26,12 +26,15 @@ file build-arm/gateway | grep -q aarch64 || { echo "❌ 产物不是 aarch64!"; 
 echo "    ✅ aarch64 OK"
 
 if [ "$1" = "--deploy" ]; then
-    echo "==> [4/4] 部署到板子 $BOARD_IP"
+    echo "==> [4/5] 部署到板子 $BOARD_IP"
     ssh -o BatchMode=yes root@$BOARD_IP "pkill -x gateway || true; sleep 1" 2>/dev/null
     scp -o BatchMode=yes build-arm/gateway root@$BOARD_IP:/root/gateway
+    echo "==> [5/5] 传输配置文件"
+    ssh -o BatchMode=yes root@$BOARD_IP "mkdir -p /root/config"
+    scp -o BatchMode=yes config/gateway.yaml root@$BOARD_IP:/root/config/gateway.yaml
     ssh -o BatchMode=yes root@$BOARD_IP "nohup /root/gateway $PORT > /root/gateway.out 2>&1 & sleep 1"
-    echo "==> 验证 /api/health:"
-    ssh -o BatchMode=yes root@$BOARD_IP "wget -q -O- http://127.0.0.1:$PORT/api/health"
+    echo "==> 验证 /api/health + /api/version:"
+    ssh -o BatchMode=yes root@$BOARD_IP "wget -q -O- http://127.0.0.1:$PORT/api/health; echo; wget -q -O- http://127.0.0.1:$PORT/api/version; echo"
     echo ""
     echo "✅ 完成"
 else

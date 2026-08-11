@@ -84,9 +84,95 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 - ⚠️ 部署注意:程序启动时读 `config/gateway.yaml`(相对路径),**config 目录必须和 gateway 一起传到板上**(已部署到 `/root/config/gateway.yaml`);`build-arm.sh --deploy` **当前不传 config**,需手动 scp 或后续改进脚本
 - 端口逻辑:`argv[1]` 优先于 config 里的 `server.port`;板上用 `8081` 避开摄像头的 8080
 
-### 5.4 阶段三
-- mongoose `mg_mqtt_connect` 连板上 mosquitto(127.0.0.1:1883)
-- 订阅 `dev/mcu01/report`;`/api/control` → 组信封 → 发布 `dev/mcu01/cmd`
+### 🔍 mqtt_client 代码审查报告(2026-08-11,接入前必读)
+
+> 审查对象:`src/core/common/mqtt/mqtt_client.h/.cpp`(用户草稿,已修到能编译)
+> 方法:逐行核对 mongoose 7.20 源码,非推测
+> 状态:**代码尚未接入 main.cpp**,以下问题在接入前处理
+
+#### ✅ 已验证 OK(可放心)
+
+- `c->fn_data` 传 `this` 给静态回调:查 `mg_connect_svc` 源码,确认 `c->fn_data = fn_data` ✅
+- `publish` 里栈上 `opts` + 临时 `mg_str(topic.c_str())`:查 `mg_mqtt_pub` 源码,`mg_send` 是**同步拷贝**进发送缓冲,函数返回后 string 析构无悬垂 ✅
+- `on_message` 回调参数已转 `std::string`(拷贝出接收缓冲区)✅
+- `Logger` 单例有互斥锁,回调里 `LOG_*` 线程安全 ✅
+- `on_message` 空调用有 `if` 保护 ✅
+
+#### 🔴 高风险(接入前必须处理)
+
+1. **生命周期:MqttClient 析构 vs 连接存活**
+   - `event_handler` 经 `c->fn_data` 拿 `this`。若对象先销毁而连接还在 mongoose 循环 → 回调触发**野指针崩溃**
+   - **要求**:MqttClient 生命周期 ≥ mgr 事件循环(main 栈上 + 退出前 `mg_mgr_free`,或堆分配常驻);**禁止**局部临时对象/拷贝
+
+2. **断线不会自动重连(功能缺失)**
+   - `reconnect_timer` 只声明未实现,`try_reconnect` 无人调用 → 掉线后永久断开
+   - **修复**:`mg_timer_init(&mgr->timers, &timer_, 5000, MG_TIMER_REPEAT, reconnect_timer, this)` 周期调 `try_reconnect`(timer_ 需加为成员)
+
+3. **topic 硬编码**:`"dev/mcu01/report"` 写死在 `handler_event`。config 里已有 `mqtt_topic_report`,应从 `Config` 传入(构造参数或 connect 参数)
+
+#### 🟡 中风险
+
+4. **CONNACK 未检查 ack**:`MG_EV_MQTT_OPEN` 的 `ev_data` 是 **`uint8_t*`(ack 码,0=成功)**——⚠️ mongoose.h 注释写 `int *` 但实现传 `&mm.ack`(uint8_t),**注释与实现不符,以实现为准**。当前不检查直接订阅;认证失败(ack≠0)时应记 ERROR 不订阅
+5. **connect 可重复调用导致泄漏**:连续两次 `connect` 旧连接不断开 → 泄漏。connect 开头应 `if (conn) { conn->is_closing = 1; }` 或拒绝
+6. **publish 的"假连接"**:`conn != nullptr` ≠ 已连接(CONNACK 未回)。此时 publish 数据进缓冲区,连接失败则丢弃——可接受但需知晓;严格做法用 `subscribed_` 当"已就绪"标志
+
+#### 🔵 线程安全(专项结论)
+
+- **mongoose 单线程事件循环**:所有 `mg_*` API 必须在 mgr 所在线程调用
+- **当前安全**:`publish`/`on_message`/HTTP handler 都在同一事件循环线程
+- **红线**:将来若给 `/api/control` 或设备轮询加**线程池**,别的线程直接调 `publish` 会破坏 mongoose 内部状态(发送缓冲无锁)→ 届时须用 wakeup/队列把任务投递回事件循环线程
+- **`on_message` 回调在事件循环线程执行**:回调里**禁止阻塞**(卡死整个 HTTP+MQTT)、禁止长计算;只应做"拷贝数据→投递队列→立即返回"
+
+#### ⚪ 死代码/小问题
+
+- `subscribed_` 只写不读:要么删掉,要么 `publish` 前检查(见中风险 6)
+- `reconnect_timer` 声明未定义:实现或删除
+- `try_reconnect` 当前无人调用(配合高风险 2 解决)
+
+#### 修复建议(按优先级)
+
+1. 接入:main 里 `MqttClient mqtt;` 栈上创建,生命周期覆盖整个 mgr 循环;或堆分配常驻
+2. 加定时器成员 `struct mg_timer timer_;` + `mg_timer_init` 5s REPEAT 调 `try_reconnect` → 实现自动重连
+3. `connect` 增加参数或构造时传入 topic_report/topic_cmd(从 Config 读),去掉硬编码
+4. `MG_EV_MQTT_OPEN` 里检查 `*(uint8_t*)ev_data == 0` 再订阅,否则 LOG_ERROR
+5. `connect` 开头防重入:已连接则先关旧连接
+
+### ⏳ 5.4 阶段三:MQTT 客户端 — **待执行(委派给 WSL AI)**
+> 目标:网关作为 MQTT 客户端连板上 mosquitto,打通"网页 → 网关 → 单片机"控制链和"单片机 → 网关 → 网页"上报链。
+> 参考:`third_party/mongoose.h` 2874-2917 行(MQTT API)。
+
+**任务 1:MqttClient 模块**(放 `src/core/common/mqtt/` 或 `src/gateway/mqtt_client.cpp`,与现有结构统一)
+- `mg_mqtt_connect(&mgr, "mqtt://127.0.0.1:1883", &opts, handler, NULL)` 连接
+- broker 地址从 `Config` 读(`cfg.mqtt_broker`,已在 gateway.yaml 里)
+- 事件回调处理:
+  - `MG_EV_MQTT_OPEN`(CONNACK 成功)→ `mg_mqtt_sub` 订阅 `cfg.mqtt_topic_report`(`dev/mcu01/report`),打 LOG_INFO
+  - `MG_EV_MQTT_MSG` → 收到上报,`LOG_INFO("MQTT recv %.*s: %.*s", ...)`,数据暂存全局(阶段四 /api/status 用)
+  - `MG_EV_ERROR` / 连接断开 → LOG_WARN,尝试重连(简单方案:`mg_timer_add` 定时 5s 重连,或 poll 循环里判断 `c->is_closing`)
+- 发布:`mqtt_publish(topic, message)` 封装 `mg_mqtt_pub`,qos=1
+
+**任务 2:/api/control 下行**
+- 路由 `POST /api/control`,body 为 JSON:`{"type":"control","body":{"led_on":true}}` 等
+- 组信封:`{"type":"control","dev":"mcu01","ts":<unix时间戳>,"body":{...}}`(协议规范见第 1 节)
+- 发布到 `cfg.mqtt_topic_cmd`(`dev/mcu01/cmd`),返回 `{"ok":true}`
+- 需要 JSON 解析:mongoose 7.20 自带 `mg_json_get`(确认可用;yaml-cpp 不解析 JSON)
+
+**任务 3:验证(本机 + 板上)**
+- 本机:起 mosquitto(WSL 里 `sudo apt install mosquitto-clients` 或已装)→ 起 gateway → `mosquitto_pub -h 127.0.0.1 -t dev/mcu01/report -m '{"t":25}'` → 网关日志应出现 MQTT recv
+- 板上:`./build-arm.sh --deploy` → `ssh root@192.168.5.70 "mosquitto_pub -h 127.0.0.1 -t dev/mcu01/report -m 'hello'"` → 网关日志(在 `/root/gateway.out` 或 gateway.log)出现接收记录
+- 控制链:`curl -X POST http://127.0.0.1:8081/api/control -d '{"body":{"led_on":true}}'` → 板上 `mosquitto_sub -h 127.0.0.1 -t dev/mcu01/cmd -v` 应看到发布
+
+**已知坑**:
+- mongoose 7.20 `mg_mqtt_connect` 的 URL 格式:`mqtt://host:port`;`mg_mqtt_opts` 字段用 `mg_str("...")` 包裹
+- `MG_EV_MQTT_MSG` 的 `struct mg_mqtt_message *msg` 用 `msg->topic`/`msg->data`(`.buf`/`.len`,不是 `.ptr`——老坑!)
+- 板上 8081 端口测试用 `wget -q -O-`,无 curl
+- 事件回调里**不要**做耗时操作;发布/订阅用 `mg_mqtt_pub`/`mg_mqtt_sub` 是异步的,不阻塞
+- MQTT 断线重连是演示稳定性关键,至少要有重连逻辑(否则板上 mosquitto 重启网关就死了)
+
+**验收标准**:
+1. 本机:上报链(收)和控制链(发)都通,日志清晰
+2. 板上:交叉编译部署后同样验证通过
+3. 网关断线重连:kill 板上 mosquitto 再起,网关能自动重连并恢复订阅
+4. 完成后提交分支 `feature/mqtt`(从最新 main 开出),更新本文档 5.4 为 ✅
 
 ## 6. 已知的坑(别重复踩)
 
