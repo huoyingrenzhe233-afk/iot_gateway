@@ -1,6 +1,9 @@
+#include <cstdio>
+#include <cstdlib>
+
 #include <mongoose.h>
 
-#include "core/common/logger.h"
+#include "core/common/logger/logger.h"
 
 using gateway::Logger;
 using gateway::LogLevel;
@@ -26,15 +29,29 @@ static void request_handler(struct mg_connection *connect, int event, void *even
     }
 }
 
-int main(void)
+int main(int argc, char *argv[])
 {
     Logger::instance().init("gateway.log");
     LOG_INFO("gateway starting");
 
+    // Port is configurable via argv[1] (default 8080). The board's 8080 is
+    // occupied by mjpg_streamer, so pass an alternative port when deploying.
+    int port = 8080;
+    if (argc > 1)
+    {
+        int p = std::atoi(argv[1]);
+        if (p > 0 && p <= 65535)
+        {
+            port = p;
+        }
+    }
+    char listen_addr[64];
+    std::snprintf(listen_addr, sizeof(listen_addr), "http://0.0.0.0:%d", port);
+
     struct mg_mgr mgr;
     mg_mgr_init(&mgr);
-    mg_http_listen(&mgr, "http://0.0.0.0:8080", request_handler, NULL);
-    LOG_INFO("http server listening on :8080");
+    mg_http_listen(&mgr, listen_addr, request_handler, NULL);
+    LOG_INFO("http server listening on :%d", port);
 
     for (;;)
     {

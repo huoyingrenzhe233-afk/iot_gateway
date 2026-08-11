@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 project(gateway LANGUAGES C CXX)
 add_executable(gateway
     src/gateway/main.cpp
-    src/core/common/logger.cpp
+    src/core/common/logger/logger.cpp
     third_party/mongoose.c
 )
 target_include_directories(gateway PRIVATE
