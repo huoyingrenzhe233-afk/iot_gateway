@@ -1,12 +1,14 @@
 #include <cstdio>
 #include <cstdlib>
-
 #include <mongoose.h>
-
+#include "core/common/config/config.h"
 #include "core/common/logger/logger.h"
+
+static const char *VERSION = "1.0.0";
 
 using gateway::Logger;
 using gateway::LogLevel;
+using gateway::log_level_from_string;
 
 static void request_handler(struct mg_connection *connect, int event, void *event_data)
 {
@@ -15,8 +17,12 @@ static void request_handler(struct mg_connection *connect, int event, void *even
         struct mg_http_message *hm = (struct mg_http_message *)event_data;
         LOG_INFO("HTTP %.*s %.*s", (int)hm->method.len, hm->method.buf,
                  (int)hm->uri.len, hm->uri.buf);
+        if (mg_match(hm->uri, mg_str("/api/version"), NULL) == true)
+        {
+            mg_http_reply(connect, 200, "Content-Type: application/json\r\n", "{\"version\":\"%s\"}", VERSION);
+        }
 
-        if (mg_match(hm->uri, mg_str("/api/health"), NULL) == true)
+        else if (mg_match(hm->uri, mg_str("/api/health"), NULL) == true)
         {
             mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
                           "{\"status\":\"ok\"}");
@@ -31,12 +37,13 @@ static void request_handler(struct mg_connection *connect, int event, void *even
 
 int main(int argc, char *argv[])
 {
-    Logger::instance().init("gateway.log");
+    gateway::Config config = gateway::load_config("config/gateway.yaml");
+    gateway::Logger::instance().init("gateway.log", log_level_from_string(config.log_level));
     LOG_INFO("gateway starting");
 
     // Port is configurable via argv[1] (default 8080). The board's 8080 is
     // occupied by mjpg_streamer, so pass an alternative port when deploying.
-    int port = 8080;
+    int port = config.server_port;
     if (argc > 1)
     {
         int p = std::atoi(argv[1]);

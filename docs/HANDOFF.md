@@ -33,8 +33,9 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 - **板上实测(交叉编译版)**:`/api/health` → HTTP 200 `{"status":"ok"}`;`/xxx` → 404 ✅
 - ⚠️ **端口冲突**:板上 8080 被 mjpg_streamer(摄像头)占用,`main.cpp` 已支持 `argv[1]` 传端口,板上用 `gateway 8081`
 
-### ❌ 未开始
-- config 加载(`config/gateway.yaml` + yaml-cpp)、`/api/version`、MQTT 客户端、设备管理、WebSocket、规则引擎、摄像头代理
+### ⏳ 未开始
+- MQTT 客户端(阶段三 5.4)、设备管理、WebSocket、规则引擎、摄像头代理
+- ✅ 已完成:config 加载 + `/api/version`(5.2/5.3)
 
 ## 3. 环境信息
 
@@ -51,12 +52,14 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 | 摄像头启动 | `mjpg_streamer -b -i "input_uvc.so -d /dev/video9 -r 640x480 -f 15 -q 85" -o "output_http.so -p 8080"` |
 | 摄像头型号 | USB CP-LL21A(识别 0bda:d327),OV5695 是 CSI 不可用 |
 | 视频流 | `http://192.168.5.70:8080/?action=stream`(⚠️ 占用 8080,网关改 8081) |
+| sysroot 已装第三方库 | yaml-cpp **0.5.2**(`usr/lib/libyaml-cpp.so.0.5.2`)+ Boost **1.63.0 头文件**(`usr/include/boost/`),均为 ARM/header-only,源码在 `/tmp/yaml-cpp-release-0.5.2/`、`/tmp/boost_1_63_0/` |
+| 板上运行状态 | `/root/gateway 8081` + `/root/config/gateway.yaml`(config 目录结构 `/root/config/`)|
 
 ## 4. 已定的技术决策
 
 1. **网关用 mongoose 7.20 单文件**(`third_party/mongoose.c/.h`,vendor 方式)。⚠️ 注意:`mg_str` 字段是 **`buf`** 不是 `ptr`(版本特性,踩过坑)
 2. **日志:自写 logger 已落地并在项目里运行**(80 行,零依赖)。用户倾向 spdlog("不重复造轮子"的讨论已进行,原理已讲),但 **spdlog 未安装未测试**,且 buildroot 2018.02 无此包。**当前决策:先用自写 logger 推进,spdlog 待议**(走方案③:SDK 工具链手动交叉编译 + scp,不重烧镜像)
-3. 配置用 yaml-cpp(板上已装),日志/配置等基础组件放 `src/core/common/`
+3. 配置用 yaml-cpp(**板上已装 0.5.2**,sysroot 已装同版本 + Boost 1.63.0 头文件),日志/配置等基础组件放 `src/core/common/`(注意:实际目录是 `src/core/common/logger/` 和 `src/core/common/config/`,带子目录)
 4. 老师参考工程:`/home/kkk/Desktop/web_project/Iot-gateway/IotEdgeGateway`(只借鉴:file_logger.cpp / rule_engine.hpp / development.yaml)
 5. Windows 桌面文档(教程 v2.0 等 3 份)在 `/mnt/c/Users/ThinkPad/Desktop/`(WSL 里直接读)
 
@@ -67,11 +70,21 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 - 一键脚本:`./build-arm.sh`(编译)/ `./build-arm.sh --deploy`(编译+部署+验证)
 - 板上运行 `/root/gateway 8081`,`/api/health` → 200 `{"status":"ok"}` ✅
 
-### 5.2 阶段二
-- `config/gateway.yaml`(server 端口 / mqtt broker / topic / 设备号 mcu01)+ `src/core/common/config.h/.cpp`(yaml-cpp 加载)
-- `/api/version` → `{"version":"1.0.0"}`
+### ✅ 5.2 交叉编译 yaml-cpp 0.5.2 装进 linaro sysroot — **已完成(2026-08-11)**
+> 结果:sysroot 已有 `include/yaml-cpp/yaml.h` + `lib/libyaml-cpp.so.0.5.2`(ARM),网关交叉编译通过,板上 `/api/version` → 200 `{"version":"1.0.0"}` ✅
+> 三个坑(已解决,记录备查):
+> 1. tag 名是 `release-0.5.2`(不是 `yaml-cpp-0.5.2`),用 `git ls-remote --tags` 确认
+> 2. **yaml-cpp 0.5.2 严重依赖 Boost 头文件**(`boost/shared_ptr.hpp` 等,header-only)→ 需先装 Boost 1.63.0 头文件进 sysroot(`cp -r boost_1_63_0/boost $SYSROOT/usr/include/`,从 archives.boost.io 下载 97MB)
+> 3. **共享库开关变量名是 `BUILD_SHARED_LIBS`**(不是 `YAML_BUILD_SHARED_LIBS`),且 CMakeLists 116 行 `find_package(Boost REQUIRED)` 需注释掉
+> 源码位置:`/tmp/yaml-cpp-release-0.5.2/`(改过 CMakeLists 的补丁版)、`/tmp/boost_1_63_0/`
 
-### 5.3 阶段三
+### ✅ 5.3 阶段二 — **已完成(2026-08-11)**
+- `config/gateway.yaml`(server 端口 / mqtt broker / topic / 设备号 mcu01)+ `src/core/common/config/config.h/.cpp`(yaml-cpp 加载)— 已实现
+- `/api/version` → `{"version":"1.0.0"}` — 已实现,**板上验证 HTTP 200** ✅
+- ⚠️ 部署注意:程序启动时读 `config/gateway.yaml`(相对路径),**config 目录必须和 gateway 一起传到板上**(已部署到 `/root/config/gateway.yaml`);`build-arm.sh --deploy` **当前不传 config**,需手动 scp 或后续改进脚本
+- 端口逻辑:`argv[1]` 优先于 config 里的 `server.port`;板上用 `8081` 避开摄像头的 8080
+
+### 5.4 阶段三
 - mongoose `mg_mqtt_connect` 连板上 mosquitto(127.0.0.1:1883)
 - 订阅 `dev/mcu01/report`;`/api/control` → 组信封 → 发布 `dev/mcu01/cmd`
 
@@ -88,6 +101,10 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 9. **SSH 免密**:板端 dropbear 不接受 ed25519 密钥,须用 RSA 密钥(`~/.ssh/id_rsa_gw`)
 10. **板上无 curl**,验证用 `wget -q -O- http://127.0.0.1:PORT/...`
 11. **`pkill -f` 会误杀 ssh 会话自身**(命令行含目标字符串),用 `pkill -x gateway` 精确匹配
+12. **yaml-cpp 0.5.2 真依赖 Boost 头文件**(header-only,非文档原以为的零依赖)→ 交叉编译前必须先把 boost 头文件装进 sysroot(详见 5.2)
+13. **yaml-cpp 0.5.2 的共享库开关是 `BUILD_SHARED_LIBS`**(不是 `YAML_BUILD_SHARED_LIBS`,后者被静默忽略);CMakeLists 里 `find_package(Boost REQUIRED)` 需注释掉
+14. **GitHub release tag 名**:yaml-cpp 是 `release-0.5.2`;boost 源码不在 github releases(404),用 `archives.boost.io` 下载
+15. **板上有 libyaml-cpp.so.0.5.2**(buildroot 已装),网关交叉编译只需链接 sysroot 版本,运行时用板上库,无需往板上拷 .so
 
 ## 7. 从零开始:小白也能交叉编译(5 分钟)
 
@@ -152,5 +169,14 @@ tail -f gateway.log
 
 # 交叉编译 + 部署(板上)
 ./build-arm.sh --deploy
-ssh root@192.168.5.70 "wget -q -O- http://127.0.0.1:8081/api/health"   # 板上验证
+# ⚠️ 注意:--deploy 不传 config,首次部署需手动补:
+scp config/gateway.yaml root@192.168.5.70:/root/config/gateway.yaml
+ssh root@192.168.5.70 "wget -q -O- http://127.0.0.1:8081/api/version"   # 板上验证 {"version":"1.0.0"}
+
+# 板上完整手动部署(杀旧进程 → 传程序 → 启动 → 验证)
+ssh root@192.168.5.70 "pkill -x gateway; sleep 1"
+scp build-arm/gateway root@192.168.5.70:/root/gateway
+ssh root@192.168.5.70 "mkdir -p /root/config"
+scp config/gateway.yaml root@192.168.5.70:/root/config/gateway.yaml
+ssh root@192.168.5.70 "nohup /root/gateway 8081 > /root/gateway.out 2>&1 & sleep 1; wget -q -O- http://127.0.0.1:8081/api/health"
 ```
