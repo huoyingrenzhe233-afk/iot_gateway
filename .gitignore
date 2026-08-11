@@ -9,6 +9,9 @@ build/
 *.a
 *.so
 
+# 运行日志
+*.log
+
 # 编辑器
 .vscode/
 .idea/
