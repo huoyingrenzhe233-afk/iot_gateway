@@ -1,5 +1,6 @@
 # CMake 构建产物
 build/
+build-arm/
 
 # opencode 工具内部数据
 .omo/
@@ -8,6 +9,7 @@ build/
 *.o
 *.a
 *.so
+gateway_arm
 
 # 运行日志
 *.log
