@@ -18,6 +18,7 @@ gateway_arm
 .vscode/
 .idea/
 *.swp
+.clangd
 
 # Qt
 *.pro.user

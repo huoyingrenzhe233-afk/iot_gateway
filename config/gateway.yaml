@@ -1,7 +1,7 @@
 server:
   port: 8080
 mqtt:
-  broker: "127.0.0.1:1883"
+  broker: "mqtt://127.0.0.1:1883"
   topic_report: "dev/mcu01/report"
   topic_cmd: "dev/mcu01/cmd"
 device:
