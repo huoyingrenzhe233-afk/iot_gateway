@@ -226,7 +226,7 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 - ⚠️ **一致性铁律**:规则引擎 yaml 的 sensor_id/actuator_id 必须与这两个 yaml 的 id 一字不差(老师参考工程栽在这,教程 5.2.8 强调)
 
 **📝 2026-08-12 device 模块 5 个问题修复记录(代码审查后)**:
-1. 🔴 **status 回执解析补全**(原为空,执行器状态永远 0):遍历 `body.items[]` 数组,按 name 匹配 led/led_br/motor/motor_sp/motor_dir/buzzer 更新 `actuators_`;越界用 `mg_json_get_long` 默认值(-1)作终止条件,上限 16 项防死循环。**实测**:回执后 `/api/status` 正确显示 `led_on:1 led_br:80 motor_on:1 motor_sp:50`
+1. 🔴 **status 回执解析补全**(原为空,执行器状态永远 0):遍历 `body.items[]` 数组,按 name 匹配 led/led_br/motor/motor_sp/motor_dir/buzzer 更新 `actuators_`(长短名兼容 led/led_on 等)。**越界判断已从 -1 改为 `mg_json_get_tok` 节点存在性检查(见下方 2026-08-12 遍历终止条件修复记录)**。**实测**:回执后 `/api/status` 正确显示 `led_on:1 led_br:80 motor_on:1 motor_sp:50`
 2. 🟡 **last_seen 去引号**:`mg_json_get_tok` → `mg_json_get_str`(ts 是字符串,get_tok 会带引号)
 3. ⚪ **缩进统一**(取 type 段 4→8 空格)
 4. 🟡 **JSON 转义**:新增 `json_escape()`(转义 `"` `\` 控制字符),`/api/devices` 的 id/kind/protocol/description 全过转义——防 yaml 里特殊字符破坏 JSON

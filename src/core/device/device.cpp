@@ -138,27 +138,33 @@ namespace gateway
     // /api/control 成功下发后调用,让 /api/status 立即反映新状态,
     // 不必等单片机回执(回执来了再覆盖,以实际执行为准)
     //
-    // 命令信封是网关自己组包的(build_control_envelope),6 个字段必然
-    // 齐全,所以直接取值赋值,不需要 -1 判断(那个判断和合法值有歧义)。
-    // 取不到时 mg_json_get_long 返回默认值 0,不影响(理论上不会发生)。
+    // 支持部分字段下发:字段存在才更新,缺失的字段保持原值(增量语义)。
+    // 不能用默认值 0 直接赋值(字段缺失会被误重置为 0)。
+    // 判断方式:mg_json_get_tok 节点存在性,不用 -1(和合法值有歧义)。
     // ------------------------------------------------------------
     void Device::update_from_control(const std::string &envelope)
     {
         struct mg_str json = mg_str_n(envelope.data(), envelope.size());
 
-        // 命令信封 body 里的 6 个字段(数值类型,直接取值赋值)
-        actuators_.led_on =
-            (mg_json_get_long(json, "$.body.led_on", 0) != 0) ? 1 : 0;
-        actuators_.led_br =
-            static_cast<int>(mg_json_get_long(json, "$.body.led_br", 0));
-        actuators_.motor_on =
-            (mg_json_get_long(json, "$.body.motor_on", 0) != 0) ? 1 : 0;
-        actuators_.motor_sp =
-            static_cast<int>(mg_json_get_long(json, "$.body.motor_sp", 0));
-        actuators_.motor_dir =
-            (mg_json_get_long(json, "$.body.motor_dir", 0) != 0) ? 1 : 0;
-        actuators_.buzzer =
-            (mg_json_get_long(json, "$.body.buzzer", 0) != 0) ? 1 : 0;
+        // 辅助 lambda:字段存在才执行更新
+        auto update_if_present = [&json](const char *path, int &field,
+                                         bool normalize_bool) {
+            struct mg_str tok = mg_json_get_tok(json, path);
+            if (tok.len > 0)
+            {
+                long v = mg_json_get_long(json, path, 0);
+                field = normalize_bool ? ((v != 0) ? 1 : 0)
+                                       : static_cast<int>(v);
+            }
+        };
+
+        // 命令信封 body 里的 6 个字段:存在才更新,缺失保持原值
+        update_if_present("$.body.led_on", actuators_.led_on, true);
+        update_if_present("$.body.led_br", actuators_.led_br, false);
+        update_if_present("$.body.motor_on", actuators_.motor_on, true);
+        update_if_present("$.body.motor_sp", actuators_.motor_sp, false);
+        update_if_present("$.body.motor_dir", actuators_.motor_dir, true);
+        update_if_present("$.body.buzzer", actuators_.buzzer, true);
 
         LOG_INFO("device: control update led_on=%d led_br=%d motor_on=%d motor_sp=%d motor_dir=%d buzzer=%d",
                  actuators_.led_on, actuators_.led_br,
