@@ -51,12 +51,19 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 - **板上实测(交叉编译版)**:`/api/health` → HTTP 200 `{"status":"ok"}`;`/xxx` → 404 ✅
 - ⚠️ **端口冲突**:板上 8080 被 mjpg_streamer(摄像头)占用,`main.cpp` 已支持 `argv[1]` 传端口,板上用 `gateway 8081`
 
+### ✅ 阶段 2(配置加载)— 完成(2026-08-11)
+- `config/gateway.yaml` + `src/core/common/config/`(yaml-cpp 加载)+ `/api/version` → `{"version":"1.0.0"}`(本机 + 板上验证)
+
+### ✅ 阶段 3(MQTT 客户端)— 完成(2026-08-12,本机全链路验证)
+- `src/core/common/mqtt/`:`MqttClient`(连接/订阅/发布/断线重连)+ `/api/control` 下行(control.cpp 组信封)
+- 控制链 + 上报链双向真实 MQTT 闭环验证(独立 mosquitto_sub/pub 捕获证据)
+
+### ✅ 阶段 4(设备状态管理)— 完成(2026-08-12,本机全链路验证)
+- `src/core/device/`:`Device` 状态缓存 + `DeviceRegistry` 注册表 + /api/status + /api/devices
+- 上报/回执/控制三链验证通过;部分字段下发修复(详见 5.5)
+
 ### ⏳ 未开始
-- WebSocket、规则引擎、摄像头代理
-- ✅ 已完成:config 加载 + `/api/version`(5.2/5.3)
-- ✅ 已完成(2026-08-12):mqtt_client 实现 + 断线重连 + `/api/control` 下行(本机验证通过,待板上验证)
-- ✅ 已完成(2026-08-12):设备状态管理 `src/core/device/device.{h,cpp}`(6 外设缓存)+ `/api/status`(本机真实 MQTT 验证通过)
-- ✅ 已完成(2026-08-12):设备注册表 `device_registry.{h,cpp}` + `config/devices/sensors.yaml`/`actuators.yaml`(7 条静态登记)+ `/api/devices` 路由(本机验证 200)
+- 规则引擎(20 分,待办 5.6)、WebSocket /ws、摄像头接口、板上验证阶段 3/4、/api/devices/:id
 
 ## 3. 环境信息
 
@@ -106,7 +113,8 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 - ⚠️ 部署注意:程序启动时读 `config/gateway.yaml`(相对路径),**config 目录必须和 gateway 一起传到板上**(已部署到 `/root/config/gateway.yaml`);`build-arm.sh --deploy` **当前不传 config**,需手动 scp 或后续改进脚本
 - 端口逻辑:`argv[1]` 优先于 config 里的 `server.port`;板上用 `8081` 避开摄像头的 8080
 
-### 🔍 mqtt_client 代码审查报告(2026-08-11,接入前必读)
+### 🔍 mqtt_client 代码审查报告(2026-08-11)— ✅ 问题已全部修复(2026-08-12)
+> 历史审查记录,保留备查;所有问题已按修复建议处理完毕(见 5.4 阶段三完成状态)
 
 > 审查对象:`src/core/common/mqtt/mqtt_client.h/.cpp`(用户草稿,已修到能编译)
 > 方法:逐行核对 mongoose 7.20 源码,非推测
@@ -159,8 +167,8 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 4. `MG_EV_MQTT_OPEN` 里检查 `*(uint8_t*)ev_data == 0` 再订阅,否则 LOG_ERROR
 5. `connect` 开头防重入:已连接则先关旧连接
 
-### 🔄 5.4 阶段三:MQTT 客户端 — **部分完成(2026-08-12,本机全链路验证通过,待板上验证)**
-> 任务 1(MqttClient)✅ 已实现;**任务 2(/api/control)✅ 已实现并本机真实 MQTT 闭环验证**;**任务 3 本机部分通过,板上待做**
+### ✅ 5.4 阶段三:MQTT 客户端 — **已完成(2026-08-12,本机全链路验证通过)**
+> 任务 1(MqttClient)✅;**任务 2(/api/control)✅ 本机真实 MQTT 闭环验证**;任务 3 本机 ✅(板上验证见 5.5)
 > 目标:网关作为 MQTT 客户端连板上 mosquitto,打通"网页 → 网关 → 单片机"控制链和"单片机 → 网关 → 网页"上报链。
 > 参考:`third_party/mongoose.h` 2874-2917 行(MQTT API)。
 
@@ -197,73 +205,43 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 3. 网关断线重连:kill 板上 mosquitto 再起,网关能自动重连并恢复订阅
 4. 完成后提交分支 `feature/mqtt`(从最新 main 开出),更新本文档 5.4 为 ✅
 
-**📝 2026-08-12 完成记录(本机验证)**:
-- ✅ `MqttClient` 实现(`src/core/common/mqtt/`):connect/publish/on_message + 断线自动重连(常驻 `mg_timer_add` 5s REPEAT 定时器,只建一次防累积)
-- ✅ `/api/control` 下行链路:新增 `src/core/control/control.{h,cpp}`(`build_control_envelope` 组 MQTT 信封)+ main.cpp 路由(POST 校验/缺 body 返 400/MQTT 未就绪返 500)
-- ✅ 实测:本机 8099 端口 `POST /api/control` → 200 `{"status":"ok"}`,日志显示信封组包 + `mqtt publish dev/mcu01/cmd`;缺 body → 400
-- ✅ **真实 MQTT 闭环验证(2026-08-12,强证据)**:本机 mosquitto 在跑,用独立 `mosquitto_sub -t dev/mcu01/cmd` 进程捕获到网关发布的完整信封 `{"type":"cmd","dev":"mcu01","ts":"...","body":{...}}`;用 `mosquitto_pub -t dev/mcu01/report` 模拟单片机上报,网关 `on_message` 回调收到完整 sensor 信封——**控制链(发)和上报链(收)双向真实打通**
-- ✅ 完整 API 测试:health/version → 200;control 完整 → 200;缺 body → 400;未知路径 → 404;GET 访问 control → 404(方法校验生效)
-- ✅ 代码质量修复:connect 防重入、CONNACK ack 检查(注意 uint8_t)、publish 检查 subscribed_、topic 从 config 读
-- ✅ mongoose 回调传参改 `fn_data`(HttpContext 结构体,不用全局变量)——约定见技术底座章节
-- ✅ 协议键名统一(2026-08-12 二次修订):`/api/control` 请求体键名 = **`payload`**(前端 index.html 定稿用 payload + 老师 plan.md 原文也是 payload;曾临时改为 body 已改回;`control.cpp` 常量 `kControlPayloadPath = "$.payload"`,与前端实测 200 通过)
-- ✅ logger 线程安全修复:`min_level_` 检查移入互斥锁内(消除与 set_level 的数据竞争)
-- ⏳ 剩余:板上验证(任务 3)、WebSocket(5.4 后单独任务)、提交分支
+### ✅ 5.5 阶段四:设备状态管理 + 注册表 — **已完成(2026-08-12,本机全链路验证)**
+> 目标:单片机上报 → 网关缓存 → 前端轮询 /api/status;设备清单 → /api/devices
 
-**📝 2026-08-12 设备状态管理完成记录(本机真实 MQTT 验证)**:
-- ✅ 新增 `src/core/device/device.{h,cpp}`:6 外设状态缓存(传感器 temp/humi/light/ir + 执行器 led/motor/buzzer 状态),`update_from_report` 解析信封更新 + `get_status_json` 生成聚合 JSON
-- ✅ `/api/status` 路由已加(返回老师规范 10 字段:4 传感器字符串 + 6 执行器数值)
-- ✅ main.cpp 集成:on_message 回调 → `g_device.update_from_report(payload)`(static 常驻,单线程安全);HttpContext 加 device 指针
-- ✅ 实测:mosquitto_pub 模拟上报 → `/api/status` 返回 `{"temp":"25.6","humi":"60.1","light":"320","ir":"2500","led_on":0,...}`;再次上报温度变化 → 缓存更新生效
-- ⚠️ **两个解析坑(已解决)**:①`type` 字段用 `mg_json_get_tok` 会带引号 `"sensor"`,须用 `mg_json_get_str`;②传感器值是**数字**,`mg_json_get_str` 只处理字符串值(数字返回 null),须用 `mg_json_get_num` 取 double 再 `%g` 格式化
-- ⚠️ **显示细节**:`%g` 会把 `55.0` 显示成 `55`(老师示例是 `"60.0"` 带一位小数)——可接受,但若老师验收严格要求小数位,改用固定格式
-- ⏳ 待做:`GET /api/devices/:id` 单设备详情、WebSocket、规则引擎(控制命令同步缓存已完成,见下方记录)
+**功能**:
+- ✅ `src/core/device/device.{h,cpp}`:6 外设状态缓存
+  - `update_from_report`:解析 sensor 上报(4 传感器)+ status 回执(items 数组,长短名兼容)
+  - `update_from_control`:控制命令缓存(UI 秒响应,回执校准;支持部分字段下发)
+  - `get_status_json`:/api/status 的 10 字段聚合(4 传感器字符串 + 6 执行器数值)
+- ✅ `src/core/device/device_registry.{h,cpp}`:静态登记表,读 config/devices/*.yaml
+  - sensors.yaml(4 传感器:temp_1/humi_1/light_1/ir_1)+ actuators.yaml(3 执行器:led_1/motor_1/buzzer_1)
+  - `json_escape` 转义 + `kind` 校验(sensor/actuator)
+- ✅ main.cpp 集成:/api/status + /api/devices 路由;on_message → update_from_report;HttpContext 加 device/registry 指针(fn_data)
+- ✅ 实测:上报 → /api/status 更新;回执 → 执行器校准;控制 → 缓存秒响应;部分字段下发保持其他字段;交叉编译 aarch64 ✅
 
-**📝 2026-08-12 设备注册表完成记录(本机验证)**:
-- ✅ 新增 `src/core/device/device_registry.{h,cpp}`:极简静态登记表(只有 1 台单片机 mcu01,不做动态注册/自动发现,教程 5.2.8 方案)
-- ✅ 新增 `config/devices/sensors.yaml`(4 传感器:temp_1/humi_1/light_1/ir_1)+ `actuators.yaml`(3 执行器:led_1/motor_1/buzzer_1)——与单片机侧最终确认的 6 外设对应(温湿度一体出 2 条)
-- ✅ `/api/devices` 路由:返回 7 条登记 JSON(含 id/kind/protocol/description),满足老师验收"至少 3 传感器+3 执行器"
-- ✅ 实测:启动日志 7 条逐一登记,`GET /api/devices` → 200 返回完整数组;交叉编译 aarch64 ✅
-- ⚠️ **一致性铁律**:规则引擎 yaml 的 sensor_id/actuator_id 必须与这两个 yaml 的 id 一字不差(老师参考工程栽在这,教程 5.2.8 强调)
+**已解决的解析坑(记录备查)**:
+- type 用 `mg_json_get_str`(get_tok 带引号);数字值用 `mg_json_get_num`(get_str 只认字符串)
+- 回执遍历越界用 `mg_json_get_tok` 节点存在判断(不能用 -1,与合法值冲突)
+- 部分字段下发用 tok 存在性判断(不能用默认值 0,会重置其他字段)
+- `%g` 会把 55.0 显示成 55(可接受;若严格要求小数位改固定格式)
 
-**📝 2026-08-12 device 模块 5 个问题修复记录(代码审查后)**:
-1. 🔴 **status 回执解析补全**(原为空,执行器状态永远 0):遍历 `body.items[]` 数组,按 name 匹配 led/led_br/motor/motor_sp/motor_dir/buzzer 更新 `actuators_`(长短名兼容 led/led_on 等)。**越界判断已从 -1 改为 `mg_json_get_tok` 节点存在性检查(见下方 2026-08-12 遍历终止条件修复记录)**。**实测**:回执后 `/api/status` 正确显示 `led_on:1 led_br:80 motor_on:1 motor_sp:50`
-2. 🟡 **last_seen 去引号**:`mg_json_get_tok` → `mg_json_get_str`(ts 是字符串,get_tok 会带引号)
-3. ⚪ **缩进统一**(取 type 段 4→8 空格)
-4. 🟡 **JSON 转义**:新增 `json_escape()`(转义 `"` `\` 控制字符),`/api/devices` 的 id/kind/protocol/description 全过转义——防 yaml 里特殊字符破坏 JSON
-5. 🟡 **kind 校验**:只接受 sensor/actuator,非法值 LOG_WARN + 跳过(防 yaml 写错 kind 静默进表)
-- 验证:本机编译 + 交叉编译 aarch64 均通过;5 项修复全部实测通过
-- ⏳ 待做:`GET /api/devices/:id` 单设备详情(验收标准第 2 条)、WebSocket、规则引擎
+**一致性铁律**:规则引擎 yaml 的 sensor_id/actuator_id 必须与 devices yaml 的 id 一字不差(教程 5.2.8 强调)
 
-**📝 2026-08-12 控制命令同步缓存完成记录**:
-- ✅ Device 新增 `update_from_control(envelope)`:解析命令信封 `body.{led_on,led_br,motor_on,motor_sp,motor_dir,buzzer}`,更新 actuators_ 缓存;部分字段下发时只改出现的字段(其他保持)
-- ✅ main.cpp:`/api/control` 发布成功后调用 `ctx->device->update_from_control(envelope)`
-- ✅ **逻辑闭环**:命令下发 → 立即缓存(UI 秒响应)→ 单片机回执 → 覆盖缓存(状态校准,以实际执行为准)
-- ✅ 实测:发命令后 `/api/status` 立即反映(led_on:1 led_br:80...);部分字段(只关 buzzer)其他保持;回执 motor_sp:50→30 覆盖生效
-- 交叉编译 aarch64 ✅
+### ⏳ 5.6 待办清单(按优先级)
 
-**📝 2026-08-12 status 遍历终止条件修复记录(代码审查复现)**:
-1. 🔴 **`val == -1` 当越界信号是 bug(实测复现)**:回执 items 含 `{"name":"motor_dir","value":-1}` 时,`mg_json_get_long` 返回 -1 → 被误判"越界"提前 break → 后面 buzzer 全丢。且字符串 value 也会返回 -1。**教训:`-1` 不能当"越界信号"用(和合法值冲突)**
-   - **修复**:改用 `mg_json_get_tok` 先判断 `items[i].value` 节点是否存在(`tok.len == 0` = 遍历完),再 `mg_json_get_long(path, 0)` 取值
-   - 实测:value=-1 项正常取到,后续 buzzer:1 正常处理 ✅
-2. 🟡 **`update_from_control` 去掉 -1 判断**:曾改为直接取值赋值(假设 6 字段齐全,`mg_json_get_long` 默认值 0)**——此假设后被推翻(见下一条 2026-08-12 部分字段修复记录),最终方案是 tok 存在性判断**
-3. ✅ **名字兼容已做**:回执 items 的 name 支持短名/长名两套(led/led_on、led_br/br、motor/motor_on、motor_sp/sp、motor_dir/dir、buzzer)——待与单片机侧确认最终用哪套,确认后可收窄
-- 验证:本机 + 交叉编译 aarch64;场景A(value=-1)、命令同步、长短名回执、传感器上报全部通过
+| 优先级 | 事项 | 说明 |
+|---|---|---|
+| 🔴 高 | **规则引擎(20 分)** | 4 个 API:/api/rules、reload、:id/enable、:id/disable;**先定"id→MQTT 字段映射"**(见下方待定义) |
+| 🔴 高 | **摄像头 5 接口** | 前端已调用:`/api/camera/start_stream`、`stop_stream`、`start_record`、`stop_record`、`snapshot`;网关未实现,联调前必补 |
+| 🟡 中 | 板上验证阶段三/四 | 本机已过;板上部署 `./build-arm.sh --deploy` 后验证 |
+| 🟡 中 | `/api/devices/:id` 单设备详情 | 验收标准第 2 条,简单补 |
+| 🟡 中 | WebSocket /ws | 实时推送(替代轮询);消息格式见协议定稿 |
+| 🟢 低 | feature/device 开 PR 合 main | 阶段四落袋 |
 
-**📝 2026-08-12 控制缓存部分字段下发修复记录(D0,代码审查实测复现)**:
-- 🔴 **bug**:`update_from_control` 直接 `mg_json_get_long(path, 0)` 赋值 → 字段缺失时默认 0 → **部分字段下发会重置其他执行器**(实测:只发 led_on=0,led_br 被清零)
-- **修复**:改 lambda `update_if_present`,用 `mg_json_get_tok` 判断节点存在(`tok.len > 0`)才更新,缺失保持原值(增量语义)
-- **实测**:全量下发 → 部分下发 led_on=0(led_br:80 保持)→ 只发 buzzer=1(其他保持)✅
-- **教训**:① 默认值 0 和"字段缺失"语义混淆(同 -1 坑);②"6 字段必然齐全"的假设不成立(前端/Qt 可只发部分字段,如独立开关/滑条控件)
-
-**⏳ 2026-08-12 待定义:规则引擎的 id → MQTT 字段路径映射(写规则引擎前必做)**
-- 现状:**两套标识并存,无映射表**:
-  - 注册表 id(`config/devices/*.yaml`):`temp_1` / `humi_1` / `light_1` / `ir_1` / `led_1` / `motor_1` / `buzzer_1`(规则引擎引用、前端展示用)
-  - MQTT 上报字段(`device.cpp` 解析路径):`$.body.data.temp` / `humi` / `light` / `ir`;命令字段 `body.led_on` / `led_br` / `motor_on` / `motor_sp` / `motor_dir` / `buzzer`
-- **规则引擎 yaml 引用 sensor_id/actuator_id(注册表 id),但取值时要找到对应的 MQTT 字段路径**——目前没有这层映射
-- **两种解法(写规则引擎时二选一)**:
-  - A. 加映射表:`temp_1 → $.body.data.temp`(配置文件或代码硬编码,7 条)
-  - B. 规则引擎直接引用 MQTT 字段名(`temp`/`humi`/...),不用注册表 id(简单,但偏离老师"规则引用设备 id"的设计)
-- ⚠️ 一致性铁律(226 行):规则 yaml 的 sensor_id/actuator_id 必须与 devices yaml 的 id 一字不差——映射表也遵循此铁律
+**⏳ 待定义:规则引擎的 id → MQTT 字段路径映射(写规则引擎前必做)**
+- 现状:两套标识并存——注册表 id(`temp_1`/`led_1`...)vs MQTT 字段(`$.body.data.temp`/`body.led_on`)
+- 规则引擎 yaml 引用 sensor_id/actuator_id(注册表 id),取值需对应 MQTT 字段路径——**目前无映射**
+- 两种解法(二选一):A. 加映射表(7 条);B. 规则直接引用 MQTT 字段名(简单,偏离"规则引用设备 id"设计)
 
 ### 📡 通信协议定稿(2026-08-11 盘点,唯一权威)
 
