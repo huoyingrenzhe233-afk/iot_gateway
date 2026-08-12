@@ -11,12 +11,13 @@ namespace gateway
   // 组装成发往单片机的 MQTT 命令信封
   //
   // 输入 body(HTTP 请求体):
-  //   {"type":"control","body":{"led_on":1,"led_br":80}}
+  //   {"type":"control","payload":{"led_on":1,"led_br":80}}
+  //   ⚠️ 键名是 payload(前端 index.html 定稿 + 老师 plan.md 原文,2026-08-12 对齐)
   // 输出(返回的 MQTT 信封):
   //   {"type":"cmd","dev":"mcu01","ts":"2026-08-12 10:00:00","body":{...}}
-  // 失败(没有 body 字段)返回空字符串
+  // 失败(没有 payload 字段)返回空字符串
   // ------------------------------------------------------------
-  static const char *kControlPayloadPath = "$.body";
+  static const char *kControlPayloadPath = "$.payload";
   std::string Control::build_control_envelope(const std::string &body,
                                               const std::string &device_id)
   {
@@ -26,7 +27,7 @@ namespace gateway
         mg_json_get_tok(mg_str_n(body.data(), body.size()), kControlPayloadPath);
     if (payload.len == 0)
     {
-      // 请求体里没有 body 字段 → 组包失败
+      // 请求体里没有 payload 字段 → 组包失败
       LOG_WARN("control:missing payload field");
       return "";
     }

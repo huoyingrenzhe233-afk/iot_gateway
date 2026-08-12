@@ -205,7 +205,7 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 - ✅ 完整 API 测试:health/version → 200;control 完整 → 200;缺 body → 400;未知路径 → 404;GET 访问 control → 404(方法校验生效)
 - ✅ 代码质量修复:connect 防重入、CONNACK ack 检查(注意 uint8_t)、publish 检查 subscribed_、topic 从 config 读
 - ✅ mongoose 回调传参改 `fn_data`(HttpContext 结构体,不用全局变量)——约定见技术底座章节
-- ✅ 协议键名统一:`/api/control` 请求体 `payload` → **`body`**(control.cpp 常量 `kControlPayloadPath = "$.body"`;⚠️ 已偏离老师 plan.md 原文 payload,Web/Qt 同事需同步改请求键名)
+- ✅ 协议键名统一(2026-08-12 二次修订):`/api/control` 请求体键名 = **`payload`**(前端 index.html 定稿用 payload + 老师 plan.md 原文也是 payload;曾临时改为 body 已改回;`control.cpp` 常量 `kControlPayloadPath = "$.payload"`,与前端实测 200 通过)
 - ✅ logger 线程安全修复:`min_level_` 检查移入互斥锁内(消除与 set_level 的数据竞争)
 - ⏳ 剩余:板上验证(任务 3)、WebSocket(5.4 后单独任务)、提交分支
 
@@ -545,7 +545,7 @@ std::string env = control.build_control_envelope(body, ctx->config.device_id);
 14. **GitHub release tag 名**:yaml-cpp 是 `release-0.5.2`;boost 源码不在 github releases(404),用 `archives.boost.io` 下载
 15. **板上有 libyaml-cpp.so.0.5.2**(buildroot 已装),网关交叉编译只需链接 sysroot 版本,运行时用板上库,无需往板上拷 .so
 16. **mongoose 回调传数据用 `fn_data`,别用全局变量**:`mg_http_listen(mgr, url, fn, &ctx)` 第 4 参传入,accept 新连接自动继承(`c->fn_data = lsn->fn_data`,mongoose.c:5290),回调里 `connect->fn_data` 取回。传的指针必须存活 ≥ mgr 事件循环
-17. **`/api/control` 请求体键名已从 `payload` 改为 `body`**(偏离老师 plan.md 原文 `payload`)⚠️:Web/Qt 前端必须同步改;`control.cpp` 用常量 `kControlPayloadPath = "$.body"`,将来要改只动一处
+17. **`/api/control` 请求体键名 = `payload`**(前端 index.html 定稿 + 老师 plan.md 原文;曾临时改 body 已改回 2026-08-12);`control.cpp` 用常量 `kControlPayloadPath = "$.payload"`,将来要改只动一处。**前端控制请求已实测 200**
 18. **`MG_EV_MQTT_OPEN` 的 `ev_data` 实际是 `uint8_t*`(CONNACK ack 码)**:mongoose.h 注释写 `int *connack_status_code` 是错的,以实现为准;`*(uint8_t*)ev_data == 0` 才成功
 
 ## 7. 从零开始:小白也能交叉编译(5 分钟)
