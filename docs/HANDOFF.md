@@ -243,6 +243,21 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 - 规则引擎 yaml 引用 sensor_id/actuator_id(注册表 id),取值需对应 MQTT 字段路径——**目前无映射**
 - 两种解法(二选一):A. 加映射表(7 条);B. 规则直接引用 MQTT 字段名(简单,偏离"规则引用设备 id"设计)
 
+### ✅ 2026-08-12 全代码审查(最终轮)
+
+> 审查范围:全部 13 个源文件(config/logger/mqtt/control/device/registry/main),编译通过
+
+**结论:全部通过 ✅**(config/logger/mqtt/device/device_registry/main 均无新问题)
+
+| 发现 | 处理 |
+|---|---|
+| control.h 第 15 行注释还写 `body`(代码已是 payload) | ✅ 已修注释 |
+| logger 线程安全(级别检查在锁内) | ✅ 已确认(之前修过) |
+| device 部分字段/回执遍历 | ✅ 已确认(之前修过) |
+| registry json_escape/kind 校验 | ✅ 已确认(之前修过) |
+
+**当前代码状态**:13 文件 1196 行,全部功能本机实测通过,交叉编译 aarch64 通过,无已知 bug。
+
 ### 📡 通信协议定稿(2026-08-11 盘点,唯一权威)
 
 > 来源:桌面《项目实现教程-v2.0.md》第 5 章(v1.0/开发流程指南里的命令表已过时,以本表为准)
