@@ -245,9 +245,15 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 1. 🔴 **`val == -1` 当越界信号是 bug(实测复现)**:回执 items 含 `{"name":"motor_dir","value":-1}` 时,`mg_json_get_long` 返回 -1 → 被误判"越界"提前 break → 后面 buzzer 全丢。且字符串 value 也会返回 -1。**教训:`-1` 不能当"越界信号"用(和合法值冲突)**
    - **修复**:改用 `mg_json_get_tok` 先判断 `items[i].value` 节点是否存在(`tok.len == 0` = 遍历完),再 `mg_json_get_long(path, 0)` 取值
    - 实测:value=-1 项正常取到,后续 buzzer:1 正常处理 ✅
-2. 🟡 **`update_from_control` 去掉 -1 判断**:命令信封是网关自己组的(build_control_envelope),6 字段必然齐全 → 直接取值赋值,不再 `if (v != -1)`(同款"双重语义"雷),顺带简化 6 段重复代码
+2. 🟡 **`update_from_control` 去掉 -1 判断**:曾改为直接取值赋值(假设 6 字段齐全,`mg_json_get_long` 默认值 0)**——此假设后被推翻(见下一条 2026-08-12 部分字段修复记录),最终方案是 tok 存在性判断**
 3. ✅ **名字兼容已做**:回执 items 的 name 支持短名/长名两套(led/led_on、led_br/br、motor/motor_on、motor_sp/sp、motor_dir/dir、buzzer)——待与单片机侧确认最终用哪套,确认后可收窄
 - 验证:本机 + 交叉编译 aarch64;场景A(value=-1)、命令同步、长短名回执、传感器上报全部通过
+
+**📝 2026-08-12 控制缓存部分字段下发修复记录(D0,代码审查实测复现)**:
+- 🔴 **bug**:`update_from_control` 直接 `mg_json_get_long(path, 0)` 赋值 → 字段缺失时默认 0 → **部分字段下发会重置其他执行器**(实测:只发 led_on=0,led_br 被清零)
+- **修复**:改 lambda `update_if_present`,用 `mg_json_get_tok` 判断节点存在(`tok.len > 0`)才更新,缺失保持原值(增量语义)
+- **实测**:全量下发 → 部分下发 led_on=0(led_br:80 保持)→ 只发 buzzer=1(其他保持)✅
+- **教训**:① 默认值 0 和"字段缺失"语义混淆(同 -1 坑);②"6 字段必然齐全"的假设不成立(前端/Qt 可只发部分字段,如独立开关/滑条控件)
 
 **⏳ 2026-08-12 待定义:规则引擎的 id → MQTT 字段路径映射(写规则引擎前必做)**
 - 现状:**两套标识并存,无映射表**:
