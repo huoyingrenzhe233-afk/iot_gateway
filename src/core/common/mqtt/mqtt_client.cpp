@@ -47,6 +47,7 @@ void MqttClient::publish(const std::string &topic, const std::string &message) {
   struct mg_mqtt_opts opts = {};
   opts.topic = mg_str(topic.c_str());
   opts.message = mg_str(message.c_str());
+  opts.qos = 1;
   mg_mqtt_pub(conn, &opts);
   LOG_INFO("mqtt publish %s: %s", topic.c_str(), message.c_str());
 }

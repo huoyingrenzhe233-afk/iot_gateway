@@ -174,6 +174,191 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 3. 网关断线重连:kill 板上 mosquitto 再起,网关能自动重连并恢复订阅
 4. 完成后提交分支 `feature/mqtt`(从最新 main 开出),更新本文档 5.4 为 ✅
 
+### 📡 通信协议定稿(2026-08-11 盘点,唯一权威)
+
+> 来源:桌面《项目实现教程-v2.0.md》第 5 章(v1.0/开发流程指南里的命令表已过时,以本表为准)
+
+**MQTT topic**:
+```
+上行(单片机→网关): dev/mcu01/report    # 传感器数据/状态上报, QoS 1
+下行(网关→单片机): dev/mcu01/cmd       # 控制命令, QoS 1
+网关订阅: dev/mcu01/report(或 dev/+/report)
+Broker: 板上 mosquitto 127.0.0.1:1883
+```
+
+**通用信封**(仅单片机↔网关的 MQTT;Web/Qt↔网关走 HTTP API,不用信封):
+```json
+{ "type": "sensor", "dev": "mcu01", "ts": "2026-08-07 10:00:00", "body": { ... } }
+```
+| 字段 | 说明 |
+|---|---|
+| type | sensor/status/cmd/ack/ai/query |
+| dev | 固定 "mcu01" |
+| ts | **字符串** "YYYY-MM-DD HH:MM:SS"(⚠️ 与老师 Unix 秒格式不同,网关解析要兼容两种) |
+| body | payload(实际数据) |
+
+**传感器上报(type=sensor)**:`body.data.temp/humi/light/ir`(4 个字段,单片机 cJSON 组包,2s 周期)
+
+**状态回执(type=status)**:`body.items: [{name, state, value}]`
+
+**命令下行(type=cmd,dev/mcu01/cmd,body 用老师字段)**:
+`led_on(0/1) led_br(0-100) motor_on(0/1) motor_sp(0-100) motor_dir(0/1) buzzer(0/1)`(6 个,v1.0 的 fan/servo/beep 已废弃,舵机移除)
+
+**HTTP REST API 全量表**(Web/Qt↔网关,老师 plan.md 第四章逐字规范,一个端点不多一个不少):
+
+*系统接口:*
+
+| 方法 | 路径 | 描述 | 请求体 | 响应 |
+|---|---|---|---|---|
+| GET | `/api/health` | 健康检查 | - | `{"status":"ok"}` |
+| GET | `/api/version` | 版本查询 | - | `{"version":"x.y.z"}` |
+
+*设备接口:*
+
+| 方法 | 路径 | 描述 | 请求体 | 响应 |
+|---|---|---|---|---|
+| GET | `/api/devices` | 设备列表 | - | `[{DeviceJSON}, ...]` |
+| GET | `/api/devices/:id` | 设备详情 | - | `{DeviceJSON}` 或 404 |
+| POST | `/api/actuators/:id/set` | 下发命令 | `{"value": 1}` | `{"ok":true/false}` |
+
+*控制接口:*
+
+| 方法 | 路径 | 描述 | 请求体 | 响应 |
+|---|---|---|---|---|
+| GET | `/api/status` | 设备状态聚合 | - | `{"temp":"25.5","humi":"60",...}` |
+| POST | `/api/control` | 下发控制指令 | `{"type":"control","payload":{...}}` | `{"status":"ok"}` |
+
+*规则接口:*
+
+| 方法 | 路径 | 描述 | 请求体 | 响应 |
+|---|---|---|---|---|
+| GET | `/api/rules` | 规则列表 | - | `[{RuleJSON}, ...]` |
+| POST | `/api/rules/reload` | 重载规则 | - | `{"ok":true}` |
+| POST | `/api/rules/:id/enable` | 启用规则 | - | `{"ok":true/false}` |
+| POST | `/api/rules/:id/disable` | 禁用规则 | - | `{"ok":true/false}` |
+
+*摄像头接口(可选):*
+
+| 方法 | 路径 | 描述 | 请求体 | 响应 |
+|---|---|---|---|---|
+| GET | `/api/camera/status` | 查询状态 | - | `{"running":true,"url":"...","recording":false}` |
+| POST | `/api/camera/start` | 启动推流 | - | `{"ok":true,"message":"..."}` |
+| POST | `/api/camera/stop` | 停止推流 | - | `{"ok":true,"message":"..."}` |
+| POST | `/api/camera/snapshot` | 抓拍照片 | - | `{"ok":true,"path":"...","filename":"snapshot_xxx.jpg"}` |
+| POST | `/api/camera/record/start` | 开始录制 | - | `{"ok":true,"path":"...","filename":"record_xxx.mp4"}` |
+| POST | `/api/camera/record/stop` | 停止录制 | - | `{"ok":true,"message":"..."}` |
+
+**网关 /api/status 聚合兼容**:last_payload 支持信封 `$.data.value` 和扁平 `$.value` 两种(教程 5.2.3 明确)
+
+#### Web/Qt → 网关 完整实际请求格式(Qt 同事照抄)
+
+**⚠️ 板上端口是 8081**(8080 被 mjpg-streamer 占用);本机测试才 8080。
+
+**① POST /api/control(按钮下发控制,核心)**
+
+完整 HTTP 请求:
+```
+POST /api/control HTTP/1.1
+Host: 192.168.5.70:8081
+Content-Type: application/json
+Content-Length: 97
+
+{"type":"control","payload":{"led_on":1,"led_br":80,"motor_on":0,"motor_sp":0,"motor_dir":0,"buzzer":0}}
+```
+网关处理:解析 JSON → 组 MQTT 信封 `{"type":"cmd","dev":"mcu01","ts":"...","body":{...}}` → 发布 `dev/mcu01/cmd` → 返回:
+```
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"status":"ok"}
+```
+curl 实测命令:
+```bash
+curl -X POST http://192.168.5.70:8081/api/control \
+  -H "Content-Type: application/json" \
+  -d '{"type":"control","payload":{"led_on":1,"led_br":80,"motor_on":0,"motor_sp":0,"motor_dir":0,"buzzer":0}}'
+```
+板上验证(无 curl,用 wget):
+```bash
+wget -q -O- --post-data='{"type":"control","payload":{"led_on":1,"led_br":80}}' \
+  --header="Content-Type: application/json" \
+  http://127.0.0.1:8081/api/control
+```
+Qt 写法(QNetworkAccessManager):POST 到 `http://192.168.5.70:8081/api/control`,`QJsonObject body{ "type":"control", "payload":{...6字段} }` → `mgr->post(req, QJsonDocument(body).toJson())` → 处理返回 `{"status":"ok"}`
+
+**② GET /api/status(轮询看实时数据)**
+```
+GET http://192.168.5.70:8081/api/status
+→ 响应: {"temp":"25.5","humi":"60.0","light":"500","ir":"2500","led_on":1,"led_br":80}
+```
+curl:`curl http://192.168.5.70:8081/api/status`;Qt:`mgr->get(QNetworkRequest(QUrl(...)))`
+
+**③ 其他 API 同格式**:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` `/api/rules*` `/api/camera/*`(清单见上表)
+
+**④ WebSocket(推送,Qt 用 QWebSocket)**:连接 `ws://192.168.5.70:8081/ws`;可替代轮询(数据一到就推)
+
+| 方向 | 类型字段 | 描述 |
+|---|---|---|
+| Client → Server | (无 type) | 模拟 MQTT 发布:`{"topic":"...","payload":"..."}` |
+| Server → Client | `mqtt_msg` | MQTT 消息广播:`{"type":"mqtt_msg","topic":"...","payload":"..."}` |
+| Server → Client | `mqtt_pub_ack` | 发布确认:`{"type":"mqtt_pub_ack","ok":true}` |
+| Server → Client | `error` | 错误信息:`{"type":"error","error":"missing_topic"}` |
+
+### 🏗️ 技术底座:单线程事件循环下的性能与线程安全约定(2026-08-11 定)
+
+> 来源:与用户讨论"payload 是啥 / 上报后处理链 / 轮询线程安全 / 高密度请求 / 视频功能"后的架构决策。阶段 2/3/4 的代码都按此约定写。
+
+#### 核心认知
+
+- **mongoose 是单线程事件循环**(已读 mongoose.c 确认):HTTP 回调、MQTT 回调、定时器回调全部在**同一线程顺序执行**,任意时刻只有一个回调在跑 → 天然无"两个回调并发访问共享数据"的问题
+- **HTTP 无法广播**(一问一答);"推送"靠 WebSocket(`/ws`,教程 5.2.7)。广播的实现:`MQTT收到 → 内存缓存 → ws 推送`;简单版靠 HTTP 轮询取缓存(数据先落缓存,谁问给谁)
+- **铁律:事件循环线程只做微秒级的事**;慢事(磁盘/视频/大计算)全部扔出事件循环
+
+#### 上报后网关处理链(阶段 2 实现顺序)
+
+```
+MQTT 回调 MG_EV_MQTT_MSG(on_message 挂载点)
+  ① 解析信封 type/dev/ts/body(注意 ts 是字符串,兼容老师 Unix 秒两种)
+  ② 提取 body.data.temp/humi/light/ir
+  ③ 更新内存缓存 last_payload + last_seen(在线状态)
+  ④ 触发规则引擎 OnSensorValue(阶段7,先留空接口)
+  ⑤ 待写队列(微秒)← sqlite 写线程取走
+  ⑥ 广播:ws 推送(阶段3)/ 或只靠轮询读缓存(阶段2)
+```
+
+#### 线程安全约定(写代码必须遵守)
+
+| 场景 | 结论 |
+|---|---|
+| 事件循环线程内(HTTP回调调 publish、on_message 存缓存) | ✅ 安全,单线程顺序执行 |
+| **将来加独立线程**(sqlite 写线程/worker 线程池) | ⚠️ 唯一风险源:跨线程共享数据必须加锁;**跨线程直接调 mg_\* API 禁止** |
+| 轮询 /api/status 读缓存 | ✅ 安全(HTTP 回调在事件循环线程,读写同一线程) |
+
+**决策:阶段 2 先单线程直写 sqlite(1 台设备 2s 一条,数据量小,演示够用);稳了再上"队列+写线程"(教程 4.3.5 的雏形)。**
+
+#### sqlite 落库方案(阶段 2 可选升级)
+
+```
+MQTT回调(快):解析→更新内存→push 待写队列(微秒,不碰磁盘)
+   ↓ 队列(互斥锁保护,唯一跨线程共享)
+sqlite 写线程(慢):每 N 秒批量取出→事务 INSERT 多条(ms 级)
+```
+
+#### 视频功能架构(阶段 4)——网关只调度,不搬运
+
+- **视频流**:mjpg-streamer 独立进程(8080 端口),Web **直接连 8080 看流**,网关不碰
+- **拍照**:网关调 mjpg-streamer `?action=snapshot`,返回照片 URL 给前端
+- **录像**:网关 spawn ffmpeg 独立进程,ffmpeg 自己录到 /data/video/
+- **铁律:视频处理(ffmpeg/转码)严禁进事件循环**,全在独立进程
+- 网关对视频的角色 = 调度员(返回 URL/发启动停止命令),不是搬运工
+
+#### 高密度请求应对(现阶段结论)
+
+- 纯读内存缓存返回 JSON:每秒几百次轮询无压力(mongoose 扛上千连接)
+- **轮询只读内存缓存,永不查磁盘** → 高密度也不卡
+- 回调里禁止:sleep、死循环、ffmpeg 调用
+- 量级预估:1 台单片机 2s 一条 + 1-2 个前端轮询 1s → 远达不到卡顿量级,现阶段不用焦虑
+
 ## 6. 已知的坑(别重复踩)
 
 1. **buildroot 改配置后必须 `make savedefconfig`**,否则不生效;输出在独立目录 `output/rockchip_rk3568`
