@@ -8,6 +8,8 @@
 #include "core/common/logger/logger.h"   // 日志
 #include "core/common/mqtt/mqtt_client.h" // MQTT 客户端
 #include "core/control/control.h"        // 控制信封组包
+#include "core/device/device.h"          // 设备状态管理(6 外设缓存)
+#include "core/device/device_registry.h" // 设备注册表(静态登记)
 #include <cstdio>
 #include <cstdlib>
 #include <mongoose.h>
@@ -25,6 +27,8 @@ struct HttpContext
 {
   gateway::Config config;      // 配置副本(值拷贝,回调里只读)
   gateway::MqttClient *mqtt = nullptr; // MQTT 客户端指针(供 /api/control 发布)
+  gateway::Device *device = nullptr;   // 设备状态缓存(供 /api/status 读)
+  gateway::DeviceRegistry *registry = nullptr; // 设备注册表(供 /api/devices)
 };
 
 // ------------------------------------------------------------
@@ -60,6 +64,38 @@ static void request_handler(struct mg_connection *connect, int event,
                     "{\"status\":\"ok\"}");
     }
 
+    // GET /api/devices → 设备列表(注册表,老师验收:至少 3 传感器+3 执行器)
+    else if (mg_match(hm->uri, mg_str("/api/devices"), NULL) == true)
+    {
+      if (ctx->registry != nullptr)
+      {
+        std::string list = ctx->registry->to_json_list();
+        mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
+                      "%s", list.c_str());
+      }
+      else
+      {
+        mg_http_reply(connect, 500, "Content-Type: application/json\r\n",
+                      "{\"error\":\"registry_not_ready\"}");
+      }
+    }
+
+    // GET /api/status → 设备状态聚合(Web/Qt 轮询接口)
+    else if (mg_match(hm->uri, mg_str("/api/status"), NULL) == true)
+    {
+      if (ctx->device != nullptr)
+      {
+        std::string status = ctx->device->get_status_json();
+        mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
+                      "%s", status.c_str());
+      }
+      else
+      {
+        mg_http_reply(connect, 500, "Content-Type: application/json\r\n",
+                      "{\"status\":\"error\",\"message\":\"device not ready\"}");
+      }
+    }
+
     // POST /api/control → 控制命令下行(核心)
     // 要求:method 必须是 POST(防止 GET 误触发)
     else if (mg_match(hm->uri, mg_str("/api/control"), NULL) &&
@@ -81,6 +117,11 @@ static void request_handler(struct mg_connection *connect, int event,
       if (ctx->mqtt != nullptr)
       {
         ctx->mqtt->publish(ctx->config.mqtt_topic_cmd, envelope);
+        // 同步到状态缓存:让 /api/status 立即反映新命令状态(不必等回执)
+        if (ctx->device != nullptr)
+        {
+          ctx->device->update_from_control(envelope);
+        }
         mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
                       "{\"status\":\"ok\"}");
       }
@@ -135,20 +176,30 @@ int main(int argc, char *argv[])
   static gateway::MqttClient g_mqtt; // 或局部变量
   g_mqtt.connect(&mgr, config.mqtt_broker, "gateway-1",
                  config.mqtt_topic_report);
-  // 6. 注册收到上报的回调(单片机发 sensor/status 时会触发)
+  // 6. 设备状态缓存(static 常驻,on_message 写、/api/status 读,同线程安全)
+  static gateway::Device g_device;
+  // 6.5 设备注册表(static 常驻,启动时从 config/devices/*.yaml 静态登记)
+  static gateway::DeviceRegistry g_registry;
+  g_registry.load("config/devices/sensors.yaml", "config/devices/actuators.yaml");
+  LOG_INFO("device registry loaded: %zu entries", g_registry.size());
+  // 7. 注册收到上报的回调(单片机发 sensor/status 时会触发)
+  //    → 更新设备状态缓存(阶段二核心:/api/status 读的就是它)
   g_mqtt.on_message = [](const std::string &topic, const std::string &payload)
   {
     LOG_INFO("on_message: %s -> %s", topic.c_str(), payload.c_str());
+    g_device.update_from_report(payload);
   };
-  // 7. 启动 HTTP 服务,把 ctx 通过 fn_data 传给回调
+  // 8. 启动 HTTP 服务,把 ctx 通过 fn_data 传给回调
   //    HTTP 回调上下文:fn_data 传给 mongoose,回调里经 connect->fn_data 取回
   HttpContext ctx;
   ctx.config = config;
   ctx.mqtt = &g_mqtt;
+  ctx.device = &g_device;
+  ctx.registry = &g_registry;
   mg_http_listen(&mgr, listen_addr, request_handler, &ctx);
   LOG_INFO("http server listening on :%d", port);
 
-  // 8. 事件循环:轮询所有连接,分发事件到回调(单线程,永不返回)
+  // 9. 事件循环:轮询所有连接,分发事件到回调(单线程,永不返回)
   for (;;)
   {
     mg_mgr_poll(&mgr, 1000); // 每 1000ms 处理一轮:HTTP/MQTT/定时器

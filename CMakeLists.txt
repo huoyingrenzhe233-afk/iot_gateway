@@ -11,6 +11,8 @@ add_executable(gateway
     src/core/common/config/config.cpp
     src/core/common/mqtt/mqtt_client.cpp
     src/core/control/control.cpp
+    src/core/device/device.cpp
+    src/core/device/device_registry.cpp
     third_party/mongoose.c
 )
 target_include_directories(gateway PRIVATE
