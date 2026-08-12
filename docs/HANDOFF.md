@@ -226,7 +226,7 @@ Broker: 板上 mosquitto 127.0.0.1:1883
 | 方法 | 路径 | 描述 | 请求体 | 响应 |
 |---|---|---|---|---|
 | GET | `/api/status` | 设备状态聚合 | - | `{"temp":"25.5","humi":"60",...}` |
-| POST | `/api/control` | 下发控制指令 | `{"type":"control","payload":{...}}` | `{"status":"ok"}` |
+| POST | `/api/control` | 下发控制指令 | `{"type":"control","body":{...}}` | `{"status":"ok"}` |
 
 *规则接口:*
 
@@ -263,7 +263,7 @@ Host: 192.168.5.70:8081
 Content-Type: application/json
 Content-Length: 97
 
-{"type":"control","payload":{"led_on":1,"led_br":80,"motor_on":0,"motor_sp":0,"motor_dir":0,"buzzer":0}}
+{"type":"control","body":{"led_on":1,"led_br":80,"motor_on":0,"motor_sp":0,"motor_dir":0,"buzzer":0}}
 ```
 网关处理:解析 JSON → 组 MQTT 信封 `{"type":"cmd","dev":"mcu01","ts":"...","body":{...}}` → 发布 `dev/mcu01/cmd` → 返回:
 ```
@@ -276,15 +276,15 @@ curl 实测命令:
 ```bash
 curl -X POST http://192.168.5.70:8081/api/control \
   -H "Content-Type: application/json" \
-  -d '{"type":"control","payload":{"led_on":1,"led_br":80,"motor_on":0,"motor_sp":0,"motor_dir":0,"buzzer":0}}'
+  -d '{"type":"control","body":{"led_on":1,"led_br":80,"motor_on":0,"motor_sp":0,"motor_dir":0,"buzzer":0}}'
 ```
 板上验证(无 curl,用 wget):
 ```bash
-wget -q -O- --post-data='{"type":"control","payload":{"led_on":1,"led_br":80}}' \
+wget -q -O- --post-data='{"type":"control","body":{"led_on":1,"led_br":80}}' \
   --header="Content-Type: application/json" \
   http://127.0.0.1:8081/api/control
 ```
-Qt 写法(QNetworkAccessManager):POST 到 `http://192.168.5.70:8081/api/control`,`QJsonObject body{ "type":"control", "payload":{...6字段} }` → `mgr->post(req, QJsonDocument(body).toJson())` → 处理返回 `{"status":"ok"}`
+Qt 写法(QNetworkAccessManager):POST 到 `http://192.168.5.70:8081/api/control`,`QJsonObject body{ "type":"control", "body":{...6字段} }` → `mgr->post(req, QJsonDocument(body).toJson())` → 处理返回 `{"status":"ok"}`
 
 **② GET /api/status(轮询看实时数据)**
 ```
@@ -358,6 +358,42 @@ sqlite 写线程(慢):每 N 秒批量取出→事务 INSERT 多条(ms 级)
 - **轮询只读内存缓存,永不查磁盘** → 高密度也不卡
 - 回调里禁止:sleep、死循环、ffmpeg 调用
 - 量级预估:1 台单片机 2s 一条 + 1-2 个前端轮询 1s → 远达不到卡顿量级,现阶段不用焦虑
+
+#### mongoose 回调传参约定:用 fn_data,不用全局变量(2026-08-12 定)
+
+**约定:所有 mongoose 回调(HTTP/MQTT/定时器)需要用户数据时,一律用 `fn_data`,禁止全局变量桥接。**
+
+**原理**(已查 mongoose.c 源码验证):
+- 每个 `mg_connection` 自带 `void *fn_data` 字段
+- `mg_http_listen(mgr, url, fn, fn_data)` 第 4 参传入 → 存到监听连接 `c->fn_data`
+- accept 新连接时**自动继承**:`c->fn_data = lsn->fn_data`(mongoose.c:5290)
+- 回调里 `connect->fn_data` 直接取回
+
+**标准写法**:
+```cpp
+// 1. 定义上下文结构体
+struct HttpContext {
+  gateway::Config config;        // 值拷贝,安全
+  gateway::MqttClient *mqtt;     // 指针(mqtt 是 static 常驻)
+};
+
+// 2. main 里创建并传入
+HttpContext ctx;
+ctx.config = config;
+ctx.mqtt = &g_mqtt;
+mg_http_listen(&mgr, listen_addr, request_handler, &ctx);
+
+// 3. 回调里取出
+HttpContext *ctx = static_cast<HttpContext *>(connect->fn_data);
+std::string env = control.build_control_envelope(body, ctx->config.device_id);
+```
+
+**生命周期铁律**:传入的指针(如 `&ctx`)必须存活 ≥ mgr 事件循环(放 main 栈上、for 循环之前创建;或 static/堆常驻)。程序退出后才销毁 → 安全。
+
+**为什么不用全局变量**:
+- 全局变量污染命名空间、单实例限制(多开/测试互相打架)、生命周期手动管理易漏
+- `fn_data` 跟着连接走,语义清晰(请求上下文),mongoose 官方标准模式
+- 项目内已有两处范例:HTTP `request_handler` 用 `HttpContext`、MQTT `event_handler` 用 `c->fn_data` 拿 `this`
 
 ## 6. 已知的坑(别重复踩)
 

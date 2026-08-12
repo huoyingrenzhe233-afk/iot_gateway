@@ -55,6 +55,9 @@ namespace gateway
 
     void Logger::log(LogLevel level, const char *file, int line, const char *fmt, ...)
     {
+        // 级别检查 + 输出 全程在锁内:保证 min_level_ 的读写都被
+        // mutex_ 保护,避免与 set_level() 并发时的数据竞争(线程安全)
+        std::lock_guard<std::mutex> lock(mutex_);
         if (level < min_level_)
         {
             return; // 低于门槛直接丢弃,连格式化都不做
@@ -75,7 +78,7 @@ namespace gateway
         std::snprintf(line_buf, sizeof(line_buf), "[%s][%s][%s:%d] %s",
                       time_str().c_str(), level_name(level), short_file, line, msg);
 
-        std::lock_guard<std::mutex> lock(mutex_); // 控制台和文件原子输出,防多线程串行
+        // 控制台和文件原子输出,防多线程串行
         std::printf("%s\n", line_buf);
         std::fflush(stdout);
         if (file_.is_open())
