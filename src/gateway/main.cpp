@@ -14,8 +14,11 @@
 #include "core/device/device.h"          // 设备状态管理(6 外设缓存)
 #include "core/device/device_registry.h" // 设备注册表(静态登记)
 #include "core/rules/rule_engine.h"      // 规则引擎(阶段七:/api/rules 系列 + 上报触发评估)
+#include "core/storage/sqlite_store.h"   // 遥测持久化(阶段存储:队列+写线程)
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <map>
 #include <vector>
 #include <sys/wait.h> // waitpid:僵尸进程收割(reap_children)
 #include <mongoose.h>
@@ -28,6 +31,7 @@ using gateway::log_level_from_string;
 using gateway::Logger;
 using gateway::LogLevel;
 using gateway::RuleEngine;
+using gateway::SqliteStore;
 
 // HTTP 回调上下文:mongoose 用 fn_data 传给回调(不用全局变量桥接)
 // - 监听连接 accept 出的新连接会继承 lsn->fn_data(已查 mongoose.c:5290)
@@ -40,6 +44,7 @@ struct HttpContext
   gateway::DeviceRegistry *registry = nullptr; // 设备注册表(供 /api/devices)
   gateway::RuleEngine *rules = nullptr; // 规则引擎(供 /api/rules 系列路由)
   gateway::CameraManager *camera = nullptr; // 摄像头管理(供 /api/camera/* 路由)
+  gateway::SqliteStore *storage = nullptr; // 遥测存储(供 on_message 落库 + /api/history)
 };
 
 // ------------------------------------------------------------
@@ -443,6 +448,11 @@ static void request_handler(struct mg_connection *connect, int event,
              extract_rule_id(hm, "/enable", rule_id))
     {
       bool ok = (ctx->rules != nullptr) && ctx->rules->set_enabled(rule_id, true);
+      // 启停状态落库(重启后记住;低频直接写,带锁)
+      if (ok && ctx->storage != nullptr)
+      {
+        ctx->storage->save_rule_state(rule_id, true);
+      }
       mg_http_reply(connect, ok ? 200 : 404, "Content-Type: application/json\r\n",
                     ok ? "{\"ok\":true}"
                        : "{\"ok\":false,\"message\":\"rule_not_found\"}");
@@ -453,9 +463,38 @@ static void request_handler(struct mg_connection *connect, int event,
              extract_rule_id(hm, "/disable", rule_id))
     {
       bool ok = (ctx->rules != nullptr) && ctx->rules->set_enabled(rule_id, false);
+      if (ok && ctx->storage != nullptr)
+      {
+        ctx->storage->save_rule_state(rule_id, false);
+      }
       mg_http_reply(connect, ok ? 200 : 404, "Content-Type: application/json\r\n",
                     ok ? "{\"ok\":true}"
                        : "{\"ok\":false,\"message\":\"rule_not_found\"}");
+    }
+
+    // GET /api/history?limit=N → 最近 N 条遥测(老师 3.5.4:前端历史曲线)
+    // 时间升序返回 JSON 数组;limit 缺省 100
+    else if (mg_match(hm->uri, mg_str("/api/history"), NULL) &&
+             mg_match(hm->method, mg_str("GET"), NULL))
+    {
+      int limit = 100;
+      // 从 query 里抠 limit(形如 "limit=500")
+      if (hm->query.len > 6)
+      {
+        struct mg_str q = hm->query;
+        const char *p = "limit=";
+        const char *found = nullptr;
+        for (size_t i = 0; i + 6 <= q.len; i++)
+        {
+          if (std::memcmp(q.buf + i, p, 6) == 0) { found = q.buf + i + 6; break; }
+        }
+        if (found != nullptr) limit = std::atoi(found);
+      }
+      std::string hist = (ctx->storage != nullptr)
+                             ? ctx->storage->query_history(limit)
+                             : "[]";
+      mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
+                    "%s", hist.c_str());
     }
 
     // ---- 摄像头路由(方案 C:mjpg-streamer 推流 + wget 抓拍 + ffmpeg 录像) ----
@@ -667,6 +706,20 @@ int main(int argc, char *argv[])
            config.camera_port);
   // 6.8 僵尸进程收割定时器:每 5s 回收一次已退出子进程(不阻塞事件循环)
   mg_timer_add(&mgr, 5000, MG_TIMER_REPEAT, reap_children, nullptr); // 僵尸收割
+  // 6.9 遥测存储(static 常驻;队列+写线程:事件循环只 push,磁盘 IO 在写线程)
+  static gateway::SqliteStore g_storage;
+  g_storage.init("gateway.db");
+  // 恢复规则启停状态(重启后记住;yaml 是默认值,DB 里的是运行时覆盖)
+  {
+    std::map<std::string, bool> saved;
+    g_storage.load_rule_states(saved);
+    for (const auto &kv : saved)
+    {
+      g_rules.set_enabled(kv.first, kv.second); // 找不到的规则自动忽略
+    }
+    if (!saved.empty())
+      LOG_INFO("rules: restored %zu enable/disable states", saved.size());
+  }
   // 7. 注册收到上报的回调(单片机发 sensor/status 时会触发)
   //    → 更新设备状态缓存(阶段二核心:/api/status 读的就是它)
   g_mqtt.on_message = [](const std::string &topic, const std::string &payload)
@@ -674,6 +727,7 @@ int main(int argc, char *argv[])
     LOG_INFO("on_message: %s -> %s", topic.c_str(), payload.c_str());
     g_device.update_from_report(payload);
     g_rules.evaluate(payload); // 触发规则引擎评估(仅 sensor 信封生效)
+    g_storage.enqueue_telemetry(payload); // 遥测落库(队列,微秒级,不碰磁盘)
 
     // 阶段三:广播给所有 WebSocket 客户端(前端日志实时显示 MQTT 消息)
     // 格式(老师 3.3.4):{"type":"mqtt_msg","topic":"...","payload":"..."}
@@ -703,6 +757,7 @@ int main(int argc, char *argv[])
   ctx.registry = &g_registry;
   ctx.rules = &g_rules;
   ctx.camera = &g_camera;
+  ctx.storage = &g_storage;
   mg_http_listen(&mgr, listen_addr, request_handler, &ctx);
   LOG_INFO("http server listening on :%d", port);
 
