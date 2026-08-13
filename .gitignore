@@ -2,6 +2,9 @@
 build/
 build-arm/
 
+# 编译数据库副本(由 CMake copy_compile_commands 目标自动生成,含本机绝对路径,不入库)
+/compile_commands.json
+
 # opencode 工具内部数据
 .omo/
 
