@@ -15,6 +15,8 @@ namespace gateway
         std::string mqtt_topic_cmd = "dev/mcu01/cmd";       // 发布:控制命令
         std::string device_id = "mcu01";           // 设备标识(组信封 dev 字段)
         std::string log_level = "INFO";            // 日志级别
+        std::string camera_device = "/dev/video9"; // 摄像头 V4L2 设备节点
+        int camera_port = 8080;                    // mjpg-streamer HTTP 端口
     };
     // 从文件加载配置(见 config.cpp,解析失败返回默认值)
     Config load_config(const std::string &path);
