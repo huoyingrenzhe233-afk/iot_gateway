@@ -334,33 +334,39 @@ static void request_handler(struct mg_connection *connect, int event,
         mg_http_reply(connect, 400, "Content-Type: application/json\r\n",
                       "{\"error\":\"missing value\"}");
       }
-      else if (ctx->mqtt == nullptr || !ctx->mqtt->is_connected())
-      {
-        mg_http_reply(connect, 503, "Content-Type: application/json\r\n",
-                      "{\"ok\":false}");
-      }
       else
       {
         long value = mg_json_get_long(mg_str_n(hm->body.buf, hm->body.len),
                                       "$.value", 0);
         std::string envelope = Control::build_field_envelope(
             ctx->config.device_id, field, value);
-        // 按当前通道下发(MQTT publish 或 ZigBee 串口 send)
+        // 按当前通道下发(MQTT publish 或 ZigBee 串口 send);返回 false = 当前通道未就绪
+        bool sent = false;
         if (ctx->channel != nullptr)
         {
-          ctx->channel->send_to_mcu(envelope);
+          sent = ctx->channel->send_to_mcu(envelope);
         }
-        else
+        else if (ctx->mqtt != nullptr)
         {
           // 防御:channel 未初始化时退回旧 MQTT 直发(理论上不会发生)
           ctx->mqtt->publish(ctx->config.mqtt_topic_cmd, envelope);
+          sent = ctx->mqtt->is_connected();
         }
-        if (ctx->device != nullptr)
+        if (!sent)
         {
-          ctx->device->update_from_control(envelope); // 同步缓存,UI 秒响应
+          // 当前通道未就绪(MQTT 掉线 / zigbee 串口没开)→ 503
+          mg_http_reply(connect, 503, "Content-Type: application/json\r\n",
+                        "{\"ok\":false}");
         }
-        mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
-                      "{\"ok\":true}");
+        else
+        {
+          if (ctx->device != nullptr)
+          {
+            ctx->device->update_from_control(envelope); // 同步缓存,UI 秒响应
+          }
+          mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
+                        "{\"ok\":true}");
+        }
       }
     }
 
@@ -448,19 +454,26 @@ static void request_handler(struct mg_connection *connect, int event,
                       "{\"status\":\"error\",\"message\":\"missing payload\"}");
         return;
       }
-      // 发布到 MQTT 的 dev/mcu01/cmd topic,单片机收到后执行
-      if (ctx->mqtt != nullptr)
+      // 按当前通道下发(MQTT publish 或 ZigBee 串口 send);返回 false = 通道未就绪
+      bool sent = false;
+      if (ctx->channel != nullptr)
       {
-        // 按当前通道下发(MQTT publish 或 ZigBee 串口 send)
-        if (ctx->channel != nullptr)
-        {
-          ctx->channel->send_to_mcu(envelope);
-        }
-        else
-        {
-          // 防御:channel 未初始化时退回旧 MQTT 直发(理论上不会发生)
-          ctx->mqtt->publish(ctx->config.mqtt_topic_cmd, envelope);
-        }
+        sent = ctx->channel->send_to_mcu(envelope);
+      }
+      else if (ctx->mqtt != nullptr)
+      {
+        // 防御:channel 未初始化时退回旧 MQTT 直发(理论上不会发生)
+        ctx->mqtt->publish(ctx->config.mqtt_topic_cmd, envelope);
+        sent = ctx->mqtt->is_connected();
+      }
+      if (!sent)
+      {
+        // 当前通道未就绪(MQTT 掉线 / zigbee 串口没开)→ 503
+        mg_http_reply(connect, 503, "Content-Type: application/json\r\n",
+                      "{\"status\":\"error\",\"message\":\"channel not ready\"}");
+      }
+      else
+      {
         // 同步到状态缓存:让 /api/status 立即反映新命令状态(不必等回执)
         if (ctx->device != nullptr)
         {
@@ -468,12 +481,6 @@ static void request_handler(struct mg_connection *connect, int event,
         }
         mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
                       "{\"status\":\"ok\"}");
-      }
-      else
-      {
-        // MQTT 还没初始化(理论上不会发生,防御性检查)
-        mg_http_reply(connect, 500, "Content-Type: application/json\r\n",
-                      "{\"status\":\"error\",\"message\":\"mqtt not ready\"}");
       }
     }
 
