@@ -1,5 +1,5 @@
 // ============================================================
-// 网关主程序入口(阶段 1-8 全部集成)
+// 网关主程序入口(全部功能集成)
 // 职责:启动 HTTP 服务(mongoose)+ MQTT 客户端,路由 /api/* 请求,
 //       集成设备状态/注册表/规则引擎/摄像头管理/WebSocket 推送
 // 数据流:Web/Qt --HTTP/WS--> 网关 --MQTT--> 单片机
@@ -10,11 +10,11 @@
 #include "core/common/logger/logger.h"   // 日志
 #include "core/common/mqtt/mqtt_client.h" // MQTT 客户端
 #include "core/control/control.h"        // 控制信封组包
-#include "core/camera/camera_manager.h"  // 摄像头管理(方案 C:mjpg-streamer MJPEG)
+#include "core/camera/camera_manager.h"  // 摄像头管理(mjpg-streamer MJPEG)
 #include "core/device/device.h"          // 设备状态管理(6 外设缓存)
 #include "core/device/device_registry.h" // 设备注册表(静态登记)
-#include "core/rules/rule_engine.h"      // 规则引擎(阶段七:/api/rules 系列 + 上报触发评估)
-#include "core/storage/sqlite_store.h"   // 遥测持久化(阶段存储:队列+写线程)
+#include "core/rules/rule_engine.h"      // 规则引擎(/api/rules 系列 + 上报触发评估)
+#include "core/storage/sqlite_store.h"   // 遥测持久化(队列+写线程)
 #include "core/channel/zigbee_adapter.h"  // ZigBee 通道(DL-30 无线串口透传)
 #include "core/channel/channel_manager.h" // 通道管理(MQTT/ZigBee 运行时切换)
 #include <cstdio>
@@ -25,7 +25,7 @@
 #include <sys/wait.h> // waitpid:僵尸进程收割(reap_children)
 #include <mongoose.h>
 static const char *VERSION = "1.0.0"; // /api/version 返回的版本号
-static const char *kRulesPath = "config/rules/rules.yaml"; // 规则配置文件路径(阶段七,reload 时也用它)
+static const char *kRulesPath = "config/rules/rules.yaml"; // 规则配置文件路径(reload 时也用它)
 
 using gateway::Control;
 using gateway::CameraManager;
@@ -110,7 +110,7 @@ static bool extract_actuator_id(const struct mg_http_message *hm, std::string &o
 // actuator_primary_field:执行器 id → 主命令字段映射
 //   led_1 → led_on、motor_1 → motor_on、buzzer_1 → buzzer
 // 与 rule_engine.cpp 的 actuator_fields() 白名单一致;未知 id 返回 nullptr。
-// (为什么只映射"主"字段:老师验收示例 POST /api/actuators/led/set {"value":1}
+// (为什么只映射"主"字段:单执行器接口 {"value":1} 的
 //  语义是"开/关该执行器",取每个执行器最直观的开关字段)
 // ------------------------------------------------------------
 static const char *actuator_primary_field(const std::string &id)
@@ -151,7 +151,7 @@ static void ws_send_text(struct mg_connection *c, const std::string &s)
 
 // ------------------------------------------------------------
 // ws_broadcast:向所有已连接的 WebSocket 客户端广播一条文本消息
-// (阶段三核心:MQTT 消息 → 实时推送到所有前端日志窗口)
+// (MQTT 消息 → 实时推送到所有前端日志窗口)
 // ------------------------------------------------------------
 static void ws_broadcast(const std::string &text)
 {
@@ -166,7 +166,7 @@ static void ws_broadcast(const std::string &text)
 // ------------------------------------------------------------
 // handle_ws_message:处理客户端发来的 WebSocket 消息(模拟 MQTT 发布)
 // 客户端格式:{"topic":"...","payload":"..."} → 网关发布到 MQTT
-// 服务端回:{type:"mqtt_pub_ack"} / {type:"error"}(老师 3.3.4 定稿)
+// 服务端回:{type:"mqtt_pub_ack"} / {type:"error"}
 // ------------------------------------------------------------
 static void handle_ws_message(struct mg_connection *c, HttpContext *ctx,
                               struct mg_ws_message *wm)
@@ -193,7 +193,7 @@ static void handle_ws_message(struct mg_connection *c, HttpContext *ctx,
     return;
   }
 
-  // 发布到 MQTT + 回确认(老师 3.3.4:WebSocket 消息处理链路)
+  // 发布到 MQTT + 回确认
   ctx->mqtt->publish(topic_str, payload_str);
   ws_send_text(c, "{\"type\":\"mqtt_pub_ack\",\"ok\":true}");
   LOG_INFO("ws publish: %s", topic_str.c_str());
@@ -214,7 +214,7 @@ static void request_handler(struct mg_connection *connect, int event,
 
   if (event == MG_EV_WS_OPEN)
   {
-    // 握手完成,登记为 WebSocket 客户端(老师验收:连接后 MQTT 消息实时推送)
+    // 握手完成,登记为 WebSocket 客户端
     g_ws_clients.push_back(connect);
     LOG_INFO("ws client connected (total %zu)", g_ws_clients.size());
     return;
@@ -276,7 +276,7 @@ static void request_handler(struct mg_connection *connect, int event,
                     "{\"status\":\"ok\"}");
     }
 
-    // GET /api/devices → 设备列表(注册表,老师验收:至少 3 传感器+3 执行器)
+    // GET /api/devices → 设备列表
     else if (mg_match(hm->uri, mg_str("/api/devices"), NULL) &&
              mg_match(hm->method, mg_str("GET"), NULL))
     {
@@ -293,7 +293,7 @@ static void request_handler(struct mg_connection *connect, int event,
       }
     }
 
-    // GET /api/devices/<id> → 单设备详情(老师验收 3.2.5#2:返回单个设备详情)
+    // GET /api/devices/<id> → 单设备详情
     // online/last_seen 来自 Device 缓存(收到过上报 = 在线)
     else if (mg_match(hm->method, mg_str("GET"), NULL) &&
              extract_device_id(hm, device_id_str))
@@ -316,7 +316,7 @@ static void request_handler(struct mg_connection *connect, int event,
       }
     }
 
-    // POST /api/actuators/<id>/set → 单执行器下发(老师验收 3.2.5#5)
+    // POST /api/actuators/<id>/set → 单执行器下发
     // body {"value":1};id → 主命令字段 → 组信封 → 发布 + 缓存同步
     // 状态码:200 成功 / 404 未知执行器 / 400 缺 value / 503 MQTT 未连接
     else if (mg_match(hm->method, mg_str("POST"), NULL) &&
@@ -484,11 +484,11 @@ static void request_handler(struct mg_connection *connect, int event,
       }
     }
 
-    // ---- 规则引擎路由(阶段七,老师验收 4 个 API) ----
-    // 顺序铁律:reload 必须排在 :id/enable、:id/disable 之前,
+    // ---- 规则引擎路由 ----
+    // 顺序约束:reload 必须排在 :id/enable、:id/disable 之前,
     // 否则 "reload" 会被 extract_rule_id 误当成规则 id 解析。
 
-    // GET /api/rules → 规则列表(老师验收:规则引擎 4 API)
+    // GET /api/rules → 规则列表
     else if (mg_match(hm->uri, mg_str("/api/rules"), NULL) &&
              mg_match(hm->method, mg_str("GET"), NULL))
     {
@@ -505,7 +505,7 @@ static void request_handler(struct mg_connection *connect, int event,
       }
     }
 
-    // POST /api/rules/reload → 重载规则(老师要求的运行时改配置入口)
+    // POST /api/rules/reload → 重载规则(运行时改配置,不用重启)
     // 从磁盘重读 rules.yaml,保留已启用/停用状态
     else if (mg_match(hm->uri, mg_str("/api/rules/reload"), NULL) &&
              mg_match(hm->method, mg_str("POST"), NULL))
@@ -524,7 +524,7 @@ static void request_handler(struct mg_connection *connect, int event,
       }
     }
 
-    // POST /api/rules/<id>/enable → 启用某条规则(老师验收:规则引擎 4 API)
+    // POST /api/rules/<id>/enable → 启用某条规则
     else if (mg_match(hm->method, mg_str("POST"), NULL) &&
              extract_rule_id(hm, "/enable", rule_id))
     {
@@ -553,7 +553,7 @@ static void request_handler(struct mg_connection *connect, int event,
                        : "{\"ok\":false,\"message\":\"rule_not_found\"}");
     }
 
-    // GET /api/history?limit=N → 最近 N 条遥测(老师 3.5.4:前端历史曲线)
+    // GET /api/history?limit=N → 最近 N 条遥测(前端历史曲线)
     // 时间升序返回 JSON 数组;limit 缺省 100
     else if (mg_match(hm->uri, mg_str("/api/history"), NULL) &&
              mg_match(hm->method, mg_str("GET"), NULL))
@@ -578,9 +578,8 @@ static void request_handler(struct mg_connection *connect, int event,
                     "%s", hist.c_str());
     }
 
-    // ---- 摄像头路由(方案 C:mjpg-streamer 推流 + wget 抓拍 + ffmpeg 录像) ----
-    // 方法同时接受 GET 和 POST:老师给的 HTML 用 GET 直连,
-    // plan.md 写的是 POST —— 两种都认,避免前端联调踩坑
+    // ---- 摄像头路由(mjpg-streamer 推流 + wget 抓拍 + ffmpeg 录像) ----
+    // 方法同时接受 GET 和 POST:前端用 GET 直连,部分客户端用 POST,两种都认
 
     // GET/POST /api/camera/start_stream → 启动推流(fork mjpg_streamer)
     else if (mg_match(hm->uri, mg_str("/api/camera/start_stream"), NULL) &&
@@ -717,7 +716,7 @@ static void request_handler(struct mg_connection *connect, int event,
       mg_http_serve_file(connect, hm, "web/index.html", &opts);
     }
 
-    // GET /ws → WebSocket 升级(阶段三:MQTT 消息实时推送到前端日志)
+    // GET /ws → WebSocket 升级(MQTT 消息实时推送到前端日志)
     // 升级后连接仍走本回调(request_handler),事件变为 MG_EV_WS_* / CLOSE
     else if (mg_match(hm->uri, mg_str("/ws"), NULL))
     {
@@ -779,7 +778,7 @@ int main(int argc, char *argv[])
   bool rules_ok = g_rules.load(kRulesPath, g_registry);
   LOG_INFO("rules loaded: %zu entries (%s)", g_rules.size(),
            rules_ok ? "ok" : "FAILED");
-  // 6.7 摄像头管理(static 常驻,方案 C:mjpg-streamer 推流 + wget 抓拍 + ffmpeg 录像)
+  // 6.7 摄像头管理(static 常驻,mjpg-streamer 推流 + wget 抓拍 + ffmpeg 录像)
   //     fork 出的子进程(mjpg_streamer/ffmpeg/wget)由 reap_children 定时器收割
   static gateway::CameraManager g_camera;
   g_camera.set_config(config.camera_device, config.camera_port);
@@ -811,7 +810,7 @@ int main(int argc, char *argv[])
   }
   // 7. 注册收到上报的回调(单片机发 sensor/status 时会触发)
   //    统一的消息处理链(MQTT 回调和 ZigBee 串口读共用):
-  //    → 更新设备状态缓存(阶段二核心:/api/status 读的就是它)
+  //    → 更新设备状态缓存(/api/status 读的就是它)
   //    [&] 安全:main 永不返回,捕获的 static 局部量生命周期覆盖整个事件循环
   auto handle_incoming = [&](const std::string &topic, const std::string &payload) {
     LOG_INFO("incoming[%s]: %s", topic.c_str(), payload.c_str());
@@ -819,8 +818,8 @@ int main(int argc, char *argv[])
     g_rules.evaluate(payload); // 触发规则引擎评估(仅 sensor 信封生效)
     g_storage.enqueue_telemetry(payload); // 遥测落库(队列,微秒级,不碰磁盘)
 
-    // 阶段三:广播给所有 WebSocket 客户端(前端日志实时显示 MQTT 消息)
-    // 格式(老师 3.3.4):{"type":"mqtt_msg","topic":"...","payload":"..."}
+    // 广播给所有 WebSocket 客户端(前端日志实时显示 MQTT 消息)
+    // 格式:{"type":"mqtt_msg","topic":"...","payload":"..."}
     // payload 是 JSON 字符串,嵌入外层 JSON 前要 json_escape
     std::string msg = "{\"type\":\"mqtt_msg\",\"topic\":\"";
     msg += gateway::json_escape(topic);

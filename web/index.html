@@ -391,7 +391,7 @@
 
     <script>
         // ========== 视频流核心配置 ==========
-        // MJPEG 流地址:mjpg-streamer 跑在 8080 端口,用 <img> 直接显示(方案 C,零转码)
+        // MJPEG 流地址:mjpg-streamer 跑在 8080 端口,用 <img> 直接显示(零转码)
         const STREAM_URL = `http://${location.hostname}:8080/?action=stream`;
         const API_START_STREAM = '/api/camera/start_stream';
         const API_STOP_STREAM = '/api/camera/stop_stream';
@@ -456,7 +456,7 @@
                 addLog('正在启动视频流...');
                 await sendCommand(API_START_STREAM);
 
-                // 方案 C:网关 fork mjpg_streamer 后,这里用 <img> 直连 MJPEG 流
+                // 网关 fork mjpg_streamer 后,这里用 <img> 直连 MJPEG 流
                 // (MJPEG 是所有浏览器原生支持的图片流,无需 Hls.js、无需转码)
                 // ⚠️ mjpg_streamer 启动有 1~2 秒延迟,立即设 src 会"连接被拒"
                 // 导致坏图标;延迟 1.5s 再加载,配合 onerror 自动重试兜底
@@ -623,7 +623,7 @@ function setMotorDirUser(dir) {
             });
         }, 1000);
 
-        // ========== WebSocket:MQTT 消息实时推送到日志(阶段三验收 3.3.7#7) ==========
+        // ========== WebSocket:MQTT 消息实时推送到日志 ==========
         // 网关收到单片机 MQTT 上报后,会主动推 {"type":"mqtt_msg",...} 给所有
         // 连接的 WS 客户端;这里收到就写进日志窗口(实时,不用轮询)
         function connectWs() {
@@ -644,7 +644,7 @@ function setMotorDirUser(dir) {
         }
         connectWs();
 
-        // ========== 通信通道切换(MQTT/ZigBee 双通道,验收:前端切换按钮) ==========
+        // ========== 通信通道切换(MQTT/ZigBee 双通道) ==========
         const channelBtn = document.getElementById('channelBtn');
         let currentTransport = 'mqtt';
 

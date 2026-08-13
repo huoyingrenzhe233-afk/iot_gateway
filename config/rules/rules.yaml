@@ -1,5 +1,5 @@
-# 规则引擎演示规则(2026-08-13)
-# ⚠️ 一致性铁律:sensor/actuator 的 id 必须与 config/devices/*.yaml 的 id 一字不差
+# 规则引擎规则
+# ⚠️ sensor/actuator 的 id 必须与 config/devices/*.yaml 的 id 一致
 # 边沿触发:条件从不满足变满足的瞬间触发一次动作(恢复规则负责回退)
 rules:
   - id: temp_alarm

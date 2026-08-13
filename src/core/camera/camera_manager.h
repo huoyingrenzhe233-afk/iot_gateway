@@ -1,14 +1,14 @@
 #pragma once
 // ============================================================
-// 摄像头管理(阶段摄像头接口,方案 C:全链路 MJPEG,零转码)
+// 摄像头管理(全链路 MJPEG,零转码)
 // 职责:
 //   1. start_stream/stop_stream:fork/kill mjpg_streamer(推流,摄像头原生 MJPEG)
 //   2. snapshot:fork wget 从 mjpg-streamer ?action=snapshot 抓一帧存 jpg
 //   3. start_record/stop_record:fork/kill ffmpeg -c copy 录像(不编码,纯拷贝)
 // 线程模型:所有方法在 mongoose 事件循环线程调用;子进程用 fork+exec 异步
 // 启动,不阻塞事件循环(snapshot 除外,waitpid 阻塞 ~0.2s 可接受)
-// 关键决策:不用 h264_rkmpp/HLS(RK3568 MPP 栈不稳定 + 延迟大),走老师
-// plan.md 的 mjpg-streamer 参考路线(已验证路径)
+// 关键决策:不用 h264_rkmpp/HLS(RK3568 MPP 栈不稳定 + 延迟大),
+// 用 mjpg-streamer 路线(已验证路径)
 // ============================================================
 #include <string>
 #include <sys/types.h>   // pid_t

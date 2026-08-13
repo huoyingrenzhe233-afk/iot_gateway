@@ -12,7 +12,7 @@ namespace gateway
   //
   // 输入 body(HTTP 请求体):
   //   {"type":"control","payload":{"led_on":1,"led_br":80}}
-  //   ⚠️ 键名是 payload(前端 index.html 定稿 + 老师 plan.md 原文,2026-08-12 对齐)
+  //   ⚠️ 键名是 payload(与前端约定一致)
   // 输出(返回的 MQTT 信封):
   //   {"type":"cmd","dev":"mcu01","ts":"2026-08-12 10:00:00","body":{...}}
   // 失败(没有 payload 字段)返回空字符串
@@ -32,7 +32,7 @@ namespace gateway
       return "";
     }
 
-    // 2. 生成时间戳 ts,格式 "YYYY-MM-DD HH:MM:SS"(协议定稿:字符串格式)
+    // 2. 生成时间戳 ts,格式 "YYYY-MM-DD HH:MM:SS"(协议约定:字符串格式)
     char ts[32];
     std::time_t now = std::time(nullptr);
     struct tm tm = {};
