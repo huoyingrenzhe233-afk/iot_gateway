@@ -71,7 +71,7 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 - 前端 `web/index.html`(方案 C:全链路 MJPEG);详见 5.8 节
 
 ### ⏳ 未开始
-- WebSocket /ws、/api/devices/:id、feature/device 开 PR 合 main
+- WebSocket /ws、feature/device 开 PR 合 main
 
 ## 3. 环境信息
 
@@ -301,6 +301,23 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 
 > ✅ **板上真机已验证(2026-08-13)**:插摄像头后全链路测通——start_stream 真起 mjpg_streamer(8080 出流 38552B JPEG)、API 抓拍存 49640B jpg、录像 3s 存 1.7MB avi、status 正确反映 running/recording、stop_stream 进程正确退出。
 
+### ✅ 5.9 阶段设备接口补全:`/api/devices/:id` + `/api/actuators/:id/set` — **已完成(2026-08-13)**
+
+> P0 收尾:老师验收标准 3.2.5 的 #2 和 #5 两个缺失接口。
+
+**接口(实测)**:
+- `GET /api/devices/:id` → 200 `{"id","kind","protocol","description","online","last_seen"}` / 404 `{"error":"device_not_found"}`
+  - online/last_seen 来自 Device 缓存(收到上报=在线,单 mcu01 场景全设备共用)
+- `POST /api/actuators/:id/set`(body `{"value":1}`)→ 200 `{"ok":true}` / 404 `{"error":"actuator_not_found"}` / 400 `{"error":"missing value"}` / **503 `{"ok":false}`(MQTT 未连接,老师明确要求)**
+
+**id → 主命令字段映射**(`main.cpp` `actuator_primary_field`):`led_1→led_on`、`motor_1→motor_on`、`buzzer_1→buzzer`(每个执行器取最直观的开关字段;与 rule_engine 的 actuator_fields 白名单一致)
+
+**顺带重构**:命令信封组包抽到 `Control::build_field_envelope(device_id, field, value)` 静态方法,规则引擎 `fire()` 复用——协议信封格式单一来源(control.cpp/rule_engine.cpp/main.cpp 三处统一)。
+
+**⚠️ id 命名注意**:老师 plan.md 示例写的是短 id(`temp`/`led`),但项目实际 config/devices/*.yaml 用 `temp_1`/`led_1`(教程 v2.0 + 一致性铁律)。接口按 config 实际 id 实现,若老师验收按 plan.md 的 `led` 短名测会 404 —— 答辩时需说明,或后续加短名别名。
+
+**验证**:host 端到端测通(本机 mosquitto 在跑)——actuator set 发布 cmd `{"body":{"buzzer":1}}`/`{"body":{"led_on":0}}`、/api/status 缓存同步、规则引擎回归无异常(Control 重构不影响规则触发)。503 分支代码审查确认(板上停 mosquitto 可实测)。
+
 ### ⏳ 5.6 待办清单(按优先级)
 
 | 优先级 | 事项 | 说明 |
@@ -311,7 +328,8 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 | ✅ 中 | 板上验证 MQTT 心跳修复 | **已完成(2026-08-13,P0)**:空闲期不再周期性断连 |
 | ✅ 中 | 板上验证规则引擎 | **已完成(2026-08-13)**:板上实测 T2/T3/T4 全过 |
 | 🟡 中 | 板上验证摄像头 | **已完成(2026-08-13)**:插摄像头后真机测通推流/抓拍/录像(见 5.8 验证证据) |
-| 🟡 中 | `/api/devices/:id` 单设备详情 | 验收标准第 2 条,简单补 |
+| ✅ 中 | `/api/devices/:id` 单设备详情 | **已完成(2026-08-13)**,详见 5.9 |
+| ✅ 中 | `POST /api/actuators/:id/set` 单执行器 | **已完成(2026-08-13)**,详见 5.9(老师验收 3.2.5#5) |
 | 🟡 中 | WebSocket /ws | 实时推送(替代轮询);消息格式见协议定稿 |
 | 🟢 低 | feature/device 开 PR 合 main | 阶段四落袋 |
 
