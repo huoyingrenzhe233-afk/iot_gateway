@@ -21,6 +21,11 @@ gateway_arm
 snapshots/
 records/
 
+# 遥测数据库(sqlite,运行期生成)
+gateway.db
+gateway.db-wal
+gateway.db-shm
+
 # 编辑器
 .vscode/
 .idea/
