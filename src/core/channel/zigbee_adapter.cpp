@@ -155,6 +155,12 @@ void ZigbeeAdapter::poll_serial() {
     ssize_t n = read(fd_, buf, sizeof(buf));
     if (n > 0) {
       buffer_.append(buf, static_cast<size_t>(n));
+      // 防御:buffer_ 无界增长保护(正常一条消息几百字节)
+      // 超 64KB 说明对端在发无 \n 的垃圾数据,清空防止内存膨胀
+      if (buffer_.size() > 64 * 1024) {
+        LOG_WARN("zigbee: buffer overflow (no newline from peer?), cleared");
+        buffer_.clear();
+      }
       continue;
     }
     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
