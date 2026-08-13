@@ -73,14 +73,19 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 ### ✅ 阶段 9(WebSocket 实时推送)— 完成(2026-08-13,本机验证)
 - `/ws` 升级 + MQTT 消息广播;前端 WS 客户端实时显示;详见 5.10 节
 
+### ✅ 全量代码审查 + P2/P3 修复 + 真机实测校准 — 完成(2026-08-13,已部署上板)
+- 全部 12 个 C++ 模块 + 前端 + Qt + 构建 + 配置 + mcu 全量审查;实测校准推翻 3 处静态判断(S3 非 bug / M6 后果修正 / M11 严重性下调)
+- 修复 7 项(S2 0值 / M4 cmd静默 / M6 停流停录像 / M8 IR颜色 / M2 僵尸误报 / M1 waitpid阻塞 / M9 EAGAIN死循环),详见第 5 节"全量代码审查"记录
+- 已部署上板(WiFi `10.137.31.9`);遗留未修:S1 XSS、MCU 固件缺失、Qt 空壳、无鉴权
+
 ### ⏳ 未开始
-- feature/device 开 PR 合 main
+- (无;feature/device 已合 main)
 
 ## 3. 环境信息
 
 | 项 | 值 |
 |---|---|
-| 板子 IP / 登录 | `192.168.5.70`,root,SSH 已配 RSA 免密(`~/.ssh/id_rsa_gw`),ed25519 不被板端 dropbear 接受 |
+| 板子 IP / 登录 | 有线 `192.168.5.70` / **WiFi `10.137.31.9`(2026-08-13 起板子切 WiFi,IP 会变)**,root,SSH 用 RSA 密钥 `~/.ssh/id_rsa_gw`(ed25519 不被板端 dropbear 接受);⚠️ `~/.ssh/config` 只配了有线 IP 的 IdentityFile,连 WiFi IP 需手动 `-i ~/.ssh/id_rsa_gw` |
 | SDK 路径 | `/home/kkk/source/rk356x_linux` |
 | buildroot 版本 | **2018.02-rc3**(很老,无 spdlog 包) |
 | buildroot 输出目录 | `buildroot/output/rockchip_rk3568`(**独立输出目录**,改配置后必须 `make savedefconfig`);⚠️ 该目录的 `host/` 工具链**不存在**,只剩 stub,勿用 |
@@ -506,6 +511,50 @@ on_message(事件循环线程) → storage.enqueue_telemetry(payload)  只 push 
 - 语义不同:前者取"主开关字段"(开关语义),后者列"所有可下发字段"(全集)——**当前 3 执行器硬编码可接受**;若以后加执行器,两处都要改,易漏
 - 若嫌重复,可后续统一到公共头文件或 device_registry
 
+### ✅ 2026-08-13 全量代码审查 + P2/P3 修复 + 真机实测校准(全部部署上板)
+
+> 范围:全部 12 个 C++ 模块 + `web/index.html` + `qt/` + `build-arm.sh` + CMakeLists + 全部 yaml + `mcu/` + git 历史。本轮首次用"真机实测"校准静态审查结论,**推翻了 3 处此前判断**。
+
+**审查总评**:架构扎实(单线程事件循环/无锁/协议信封单一来源/内存管理干净/前端无 eval/document.write),但存在 3 个确定性 bug + 若干隐患。**已修 7 项并部署上板**。
+
+**🔴 实测校准(重要,推翻/修正此前静态判断)**:
+
+| 问题 | 此前判断 | 真机实测真相 |
+|---|---|---|
+| S3 视频重试 URL `?action=stream?t=` | "每次重试必失败" | ❌ **非 bug**:mjpg_streamer 用**前缀匹配**解析 action,`?action=stream?t=123` 实测返回 200 + `multipart/x-mixed-replace` 真 MJPEG 流,正常出流。加时间戳应用 `&t=` 而非 `?t=`(代码整洁项,非 bug) |
+| M6 停流不停录像 | "再点停止录制报 500" | ❌ 实测返回 **200 ok 假成功**;真实危害 = 前端 `recordStarted` 失步 + ffmpeg 被流断异常终止致 AVI 尾部索引损坏 |
+| M11 规则 `==` 浮点比较 | "`==` 几乎永不触发" | ❌ `25.0==25.0` 为 true 能触发;真问题 = 传感器测量值(25.3)几乎不会精确等于人为阈值(25.0),`==` 规则物理上无意义,应只用 >/</>=/<= |
+| M2 `kill(pid,0)` 僵尸误报 | "永久误报运行中" | ⚠️ 确认存在,但窗口仅 5s(reap_children 周期)后自愈;持续危害 = 崩溃后 `start_stream` 被 stale pid 拒,需手动 stop 才能重启 |
+
+**🔴 严重问题(未修,答辩必须知道)**:
+- **S1 XSS**:`web/index.html` `addLog` 用 innerHTML 拼 WS 推送的 MQTT 数据;broker 匿名免密 → 局域网可 `mosquitto_pub` 注入 `<img onerror>` 执行任意 JS 操控外设。修复:textContent(未改,用户未要求)
+- **S4 MCU 固件缺失**:`mcu/` 只有 `.gitkeep`,git 全历史无固件文件 → 四端缺一端,端到端链路不通。协议定义完备(API 文档 §11)且与网关代码**完全匹配**,只差固件实现
+- **Qt 空壳**:`qt/*.cpp` 仅 setupUi,无任何 HTTP/WS 逻辑 → 四端又缺一端
+- **全链路无鉴权**:HTTP/MQTT/WS 均无认证(课程项目可接受,答辩主动说明)
+
+**✅ 本轮已修复(7 项,部署上板验证通过)**:
+
+| # | 文件 | 问题 | 修复 |
+|---|---|---|---|
+| 1 | web/index.html | S2 0 值覆盖 | `data.led_br \|\| 50` → `?? 50`(0 不再被误判"无值") |
+| 2 | web/index.html | M4 cmd() 静默失败 | fetch 后加 `res.ok` 检查,失败解析 body 取 message 提示 |
+| 3 | web/index.html | M6 停流不停录像 | stopStream 先停录像(判断 recordStarted)再停流,同步重置录像按钮 |
+| 4 | web/index.html | M8 IR 颜色不一致 | 统一 `Number(data.ir) > 2000` 一个布尔驱动文案+颜色 |
+| 5 | camera_manager.h/.cpp | M2 僵尸误报 | stream/record_running 改 `waitpid(WNOHANG)` 探测+清 stale pid;start 用真实探测,崩溃后可重启 |
+| 6 | camera_manager.cpp | M1 waitpid 阻塞 | 新增 `stop_child()`(SIGTERM→50ms 轮询→3s 超时 SIGKILL 兜底),stop_stream/stop_record 改用 |
+| 7 | zigbee_adapter.cpp | M9 EAGAIN 死循环 | EAGAIN 改 `poll(POLLOUT,50ms)` + 重试上限 100 次防死循环 |
+
+**验证**:LSP 0 诊断;x86 `cmake --build build` 通过;ARM `./build-arm.sh` 通过(aarch64);前端 JS `node --check` 通过;部署上板 `/api/health`/`/api/status`/`/api/camera/status` 均正常。
+
+**未修的隐患(记录备查,P4 级)**:
+- M5:startStream 的 setTimeout 未保存,1.5s 内快速启停会残留视频加载
+- M7:前端轮询无 in-flight 保护 + addLog 日志无上限(DOM 无界增长)
+- M10:zigbee `buffer_` 无上限(对端发无 `\n` 垃圾数据时内存膨胀)
+- telemetry 表无限增长(用户要求"无限存",板子 flash 有限,需知磁盘写满代价)
+- M14:build-arm.sh cmake 错误被 `/dev/null` 吞 + 部署不校验板上 mosquitto/mjpg_streamer/ffmpeg
+
+**⚠️ 部署新情况(2026-08-13)**:板子切 WiFi 后 IP 变 `10.137.31.9`;`~/.ssh/config` 只配了有线 IP,连 WiFi 需手动 `-i ~/.ssh/id_rsa_gw`;本轮只传了 gateway 二进制 + web/index.html(config 未改未传)。
+
 ### 📡 通信协议定稿(2026-08-11 盘点,唯一权威)
 
 > 来源:桌面《项目实现教程-v2.0.md》第 5 章(v1.0/开发流程指南里的命令表已过时,以本表为准)
@@ -798,6 +847,9 @@ std::string env = control.build_control_envelope(body, ctx->config.device_id);
 20. **clangd 只在源文件父目录链找 `compile_commands.json`,不进 `build/` 子目录**。项目已用 CMake `copy_compile_commands` 目标把数据库复制到根目录(宿主构建时自动,已 gitignore);新装机器上先跑一次 `cmake --build build` 根目录才会出现
 21. **系统 clangd 10(ubuntu20.04)完全不读 `.clangd` 配置文件**;`.clangd` 项目配置需 clangd 12+。老版本靠根目录 compile_commands.json 自动发现,新版本靠 `.clangd` 兜底标志,两种都可用
 22. **ARM 交叉编译器(gcc 6.3 linaro)比 host gcc 9.4 严格**:range-for 里的 elaborated-type-specifier(`for (struct mg_connection *c : ...)`)会报 `warning: types may not be defined in a for-range-declaration`,host gcc 9.4 不报。**验证告警必须跑 ARM 交叉编译,不能只看 host 构建**;修复:range-for 里用 `auto *c` 而非 `struct X *c`
+23. **板子 WiFi IP 与 ssh config**:板子切 WiFi 后 IP 是 `10.137.31.9`(原有线 `192.168.5.70`);`~/.ssh/config` 只配了有线 IP 的 IdentityFile,连 WiFi IP 必须手动 `-i ~/.ssh/id_rsa_gw`,否则 `Permission denied (publickey,password)`
+24. **mjpg_streamer 宽松解析 action**:`?action=stream?t=xxx`(重复 `?`)实测也返回 200 出流——mjpg_streamer 用**前缀匹配(strncmp)解析 action 参数,不是严格 strcmp**。所以前端加时间戳要用 `&t=` 别用 `?t=`(现状 `?t=` 碰巧能用但属侥幸)
+25. **单片机 status 回执会覆盖命令下发值**:实测下发 `{"led_br":0}` 后 `/api/status` 读回仍是 50——单片机持续上报 status 回执覆盖网关缓存。调试"下发不生效"先确认是不是回执覆盖,别急着怀疑网关
 
 ## 7. 从零开始:小白也能交叉编译(5 分钟)
 
