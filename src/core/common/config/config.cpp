@@ -15,6 +15,8 @@ namespace gateway
     //   mqtt.topic_cmd     → cfg.mqtt_topic_cmd    (发布:命令 topic)
     //   device.id          → cfg.device_id         (设备标识,组信封用)
     //   log.level          → cfg.log_level         (日志级别)
+    //   camera.device      → cfg.camera_device     (摄像头 V4L2 节点)
+    //   camera.port        → cfg.camera_port       (mjpg-streamer HTTP 端口)
     //
     // 容错:文件不存在/解析失败时,打印告警并返回默认值(Config 结构体
     // 的成员默认值),程序照常启动 —— 不会因为配置问题崩溃
@@ -43,6 +45,11 @@ namespace gateway
 
             if (root["log"]["level"])
                 cfg.log_level = root["log"]["level"].as<std::string>();
+
+            if (root["camera"]["device"])
+                cfg.camera_device = root["camera"]["device"].as<std::string>();
+            if (root["camera"]["port"])
+                cfg.camera_port = root["camera"]["port"].as<int>();
         }
         catch (const std::exception &e)
         {

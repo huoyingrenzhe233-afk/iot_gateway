@@ -1,4 +1,5 @@
 #include "core/device/device_registry.h"
+#include "core/common/json_util.h"   // json_escape(与 rule_engine/main.cpp 共用)
 #include "core/common/logger/logger.h"
 
 #include <cstdio>
@@ -6,39 +7,6 @@
 
 namespace gateway
 {
-    // ------------------------------------------------------------
-    // json_escape:JSON 字符串转义(防 description 里的引号/反斜杠破坏 JSON)
-    // 只处理常见危险字符:" \ \n \r \t 和控制字符
-    // ------------------------------------------------------------
-    static std::string json_escape(const std::string &s)
-    {
-        std::string out;
-        out.reserve(s.size() + 8);
-        for (char c : s)
-        {
-            switch (c)
-            {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20)
-                {
-                    char buf[8];
-                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-                    out += buf;
-                }
-                else
-                {
-                    out += c;
-                }
-            }
-        }
-        return out;
-    }
-
     // ------------------------------------------------------------
     // load:加载 sensors.yaml + actuators.yaml 到登记表
     // 两个文件结构相同:
@@ -116,6 +84,53 @@ namespace gateway
             }
         }
         return false;
+    }
+
+    // ------------------------------------------------------------
+    // find:按 id 查找登记条目,找不到返回 nullptr
+    // (登记表条目少,线性扫描即可;返回指针指向 entries_ 内部元素,生命周期随本对象)
+    // ------------------------------------------------------------
+    const DeviceEntry *DeviceRegistry::find(const std::string &id) const
+    {
+        for (const DeviceEntry &e : entries_)
+        {
+            if (e.id == id)
+            {
+                return &e;
+            }
+        }
+        return nullptr;
+    }
+
+    // ------------------------------------------------------------
+    // to_json_detail:生成单条设备详情 JSON(老师验收 3.2.5#2)
+    // last_seen 非空 = 收到过 MQTT 上报(在线),空 = 从未上报(离线)
+    // 单台 mcu01 场景:所有外设共用同一个 last_seen(Device 缓存只有一份)
+    // 找不到 id 返回空字符串(调用方据此回 404)
+    // ------------------------------------------------------------
+    std::string DeviceRegistry::to_json_detail(const std::string &id,
+                                               const std::string &last_seen) const
+    {
+        const DeviceEntry *e = find(id);
+        if (e == nullptr)
+        {
+            return "";
+        }
+        std::string out;
+        out += "{\"id\":\"";
+        out += json_escape(e->id);
+        out += "\",\"kind\":\"";
+        out += json_escape(e->kind);
+        out += "\",\"protocol\":\"";
+        out += json_escape(e->protocol);
+        out += "\",\"description\":\"";
+        out += json_escape(e->description);
+        out += "\",\"online\":";
+        out += last_seen.empty() ? "false" : "true";
+        out += ",\"last_seen\":\"";
+        out += json_escape(last_seen);
+        out += "\"}";
+        return out;
     }
 
     // ------------------------------------------------------------

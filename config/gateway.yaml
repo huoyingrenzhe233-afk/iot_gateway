@@ -1,5 +1,5 @@
 server:
-  port: 8080
+  port: 8081            # 网关 HTTP 端口(8080 被 mjpg-streamer 摄像头占用,勿改回 8080)
 mqtt:
   broker: "mqtt://127.0.0.1:1883"
   topic_report: "dev/mcu01/report"
@@ -8,3 +8,6 @@ device:
   id: "mcu01"
 log:
   level: "INFO"
+camera:
+  device: "/dev/video9"   # USB 摄像头 V4L2 节点(插上后一般是 video9)
+  port: 8080              # mjpg-streamer HTTP 端口(前端 <img> 直连这个端口)

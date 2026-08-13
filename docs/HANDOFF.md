@@ -66,8 +66,15 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 - `src/core/rules/`:`RuleEngine`(yaml 加载/校验/边沿触发评估/启停/热重载)+ `/api/rules` 系列 4 个 API
 - 详见 5.7 节;P1 设计决策(映射表方案 A)已定稿落地
 
+### ✅ 阶段 8(摄像头接口)— 完成(2026-08-13,本机 + 板上真机验证)
+- `src/core/camera/`:`CameraManager`(mjpg-streamer 推流 / wget 抓拍 / ffmpeg -c copy 录像,零转码)+ 5 个 `/api/camera/*` 路由 + 前端页面伺服
+- 前端 `web/index.html`(方案 C:全链路 MJPEG);详见 5.8 节
+
+### ✅ 阶段 9(WebSocket 实时推送)— 完成(2026-08-13,本机验证)
+- `/ws` 升级 + MQTT 消息广播;前端 WS 客户端实时显示;详见 5.10 节
+
 ### ⏳ 未开始
-- 规则引擎(20 分,待办 5.6)、WebSocket /ws、摄像头接口、板上验证阶段 3/4、/api/devices/:id
+- feature/device 开 PR 合 main
 
 ## 3. 环境信息
 
@@ -262,20 +269,94 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 
 **规则触发数据流**:`sensor 上报 → on_message → update_from_report(缓存) + evaluate(规则) → 边沿满足 → fire 组 cmd 信封 → on_action → publish(dev/mcu01/cmd) + update_from_control(缓存同步)`
 
+### ✅ 5.8 摄像头接口 — **已完成(2026-08-13,方案 C:全链路 MJPEG,零转码)**
+
+> 决策由用户拍板:**最稳路线 = 老师 plan.md 的 mjpg-streamer 参考实现**,不用 HLS/h264_rkmpp(RK3568 MPP 栈不稳定 + 延迟大)。前端 HTML 可改。
+
+**⚠️ API 名字以老师给的 `standard/index.html` 为准**(与 plan.md 表格不同):`start_stream`/`stop_stream`/`start_record`/`stop_record`/`snapshot`(plan.md 写的是 start/stop/record/start/record/stop)。网关**GET/POST 都接受**(HTML 用 GET,plan.md 写 POST)。
+
+**文件**:
+- 新增 `src/core/camera/camera_manager.h/.cpp`:`CameraManager` 类,fork+exec 管理子进程
+- `config` 加 `camera.device`(`/dev/video9`)/`camera.port`(8080);`main.cpp` 加 5 个路由 + `/` 静态伺服 + 僵尸收割定时器;`build-arm.sh` 加 web/ 部署
+- 前端:`web/index.html`(复制自 standard,改造 HLS→MJPEG)
+
+**三个功能(全部零转码)**:
+| 功能 | 实现 |
+|---|---|
+| 推流 | fork `mjpg_streamer`(input_uvc.so 读摄像头 → output_http.so 出 MJPEG 到 8080);stop 时 SIGTERM+waitpid |
+| 抓拍 | fork `wget -q -O snapshots/snapshot_<ts>.jpg http://127.0.0.1:8080/?action=snapshot`(阻塞 waitpid ~0.2s) |
+| 录像 | fork `ffmpeg -y -i http://127.0.0.1:8080/?action=stream -c copy records/record_<ts>.avi`(纯拷贝不编码) |
+
+**进程管理约定**:
+- `spawn()`:fork;子进程关 [3,_SC_OPEN_MAX) fd + stdout/stderr→/dev/null + execvp(失败 _exit(127))
+- 僵尸收割:main 里 `mg_timer_add` 5s REPEAT 调 `waitpid(-1, WNOHANG)`(reap_children)
+- 前端 `<img src="http://<host>:8080/?action=stream">` 直连流,网关不代理视频数据
+
+**接口(实测)**:
+- `GET|POST /api/camera/start_stream|stop_stream|start_record|stop_record` → `{"ok":true}` / 500 `{"ok":false,"message":...}`
+- `GET|POST /api/camera/snapshot` → `{"ok":true,"filename":"snapshot_<ts>.jpg"}` / 500
+- `GET|POST /api/camera/status` → `{"running":bool,"recording":bool}`
+- `GET /`、`GET /index.html` → 伺服 `web/index.html`(浏览器开 `http://<板子IP>:8081/`)
+
+**已知限制**:`start_stream` 返回的是"fork 成功",不校验 mjpg_streamer 是否真在 8080 伺服(摄像头没插 → input_uvc 打开失败 → 进程即退,但 API 仍回 ok)。演示前确认摄像头已插;`/api/camera/status` 可查真实运行态。
+
+**待验证(🟡)**:板上真机——插 USB 摄像头(0bda:d327)→ deploy → 浏览器开 8081 页面点"开始推流"看实时画面 + 抓拍 + 录像。
+
+> ✅ **板上真机已验证(2026-08-13)**:插摄像头后全链路测通——start_stream 真起 mjpg_streamer(8080 出流 38552B JPEG)、API 抓拍存 49640B jpg、录像 3s 存 1.7MB avi、status 正确反映 running/recording、stop_stream 进程正确退出。
+
+### ✅ 5.9 阶段设备接口补全:`/api/devices/:id` + `/api/actuators/:id/set` — **已完成(2026-08-13)**
+
+> P0 收尾:老师验收标准 3.2.5 的 #2 和 #5 两个缺失接口。
+
+**接口(实测)**:
+- `GET /api/devices/:id` → 200 `{"id","kind","protocol","description","online","last_seen"}` / 404 `{"error":"device_not_found"}`
+  - online/last_seen 来自 Device 缓存(收到上报=在线,单 mcu01 场景全设备共用)
+- `POST /api/actuators/:id/set`(body `{"value":1}`)→ 200 `{"ok":true}` / 404 `{"error":"actuator_not_found"}` / 400 `{"error":"missing value"}` / **503 `{"ok":false}`(MQTT 未连接,老师明确要求)**
+
+**id → 主命令字段映射**(`main.cpp` `actuator_primary_field`):`led_1→led_on`、`motor_1→motor_on`、`buzzer_1→buzzer`(每个执行器取最直观的开关字段;与 rule_engine 的 actuator_fields 白名单一致)
+
+**顺带重构**:命令信封组包抽到 `Control::build_field_envelope(device_id, field, value)` 静态方法,规则引擎 `fire()` 复用——协议信封格式单一来源(control.cpp/rule_engine.cpp/main.cpp 三处统一)。
+
+**⚠️ id 命名注意**:老师 plan.md 示例写的是短 id(`temp`/`led`),但项目实际 config/devices/*.yaml 用 `temp_1`/`led_1`(教程 v2.0 + 一致性铁律)。接口按 config 实际 id 实现,若老师验收按 plan.md 的 `led` 短名测会 404 —— 答辩时需说明,或后续加短名别名。
+
+**验证**:host 端到端测通(本机 mosquitto 在跑)——actuator set 发布 cmd `{"body":{"buzzer":1}}`/`{"body":{"led_on":0}}`、/api/status 缓存同步、规则引擎回归无异常(Control 重构不影响规则触发)。503 分支代码审查确认(板上停 mosquitto 可实测)。
+
+### ✅ 5.10 WebSocket `/ws` — **已完成(2026-08-13,阶段三验收 3.3.7#7)**
+
+> MQTT 消息实时推送:单片机上报 → 网关广播给所有 WS 客户端 → 前端日志实时显示。
+
+**消息格式(老师 3.3.4 定稿)**:
+| 方向 | 类型 | 格式 |
+|---|---|---|
+| Client→Server | (无 type) | `{"topic":"...","payload":"..."}`(模拟 MQTT 发布) |
+| Server→Client | `mqtt_msg` | `{"type":"mqtt_msg","topic":"...","payload":"..."}`(广播) |
+| Server→Client | `mqtt_pub_ack` | `{"type":"mqtt_pub_ack","ok":true}` |
+| Server→Client | `error` | `{"type":"error","error":"missing_topic"/"mqtt_not_connected"}` |
+
+**实现**:
+- 网关:main.cpp 里 `g_ws_clients` 向量登记 WS 连接;`MG_EV_WS_OPEN` 登记、`MG_EV_WS_MSG` 解析发布、`MG_EV_CLOSE` 移除;`GET /ws` 升级路由;on_message 里 `ws_broadcast` 推 `mqtt_msg`
+- **mongoose 细节**(踩坑确认):`mg_ws_upgrade` 会把连接 `pfn` 换成内部 `mg_ws_cb`,但**用户回调 `fn`(request_handler)和 `fn_data`(ctx)保留**——所以升级后事件仍走 request_handler,ctx 照常可用
+- 前端:web/index.html 加 WS 客户端(`connectWs`),收到 `mqtt_msg` 写进日志窗口,断线 3s 自动重连
+- 顺带重构:json_escape 抽到 `src/core/common/json_util.h`(header-only),device_registry/rule_engine/main.cpp 三处共用(消除三份拷贝)
+
+**验证**:Python 原始 socket 实现 WS 客户端测通——握手 101、发 `{"topic","payload"}` 回 `mqtt_pub_ack`、缺 topic 回 `missing_topic`、外部 mosquitto_pub 上报后收到 `mqtt_msg` 广播,三链全通。
+
 ### ⏳ 5.6 待办清单(按优先级)
 
 | 优先级 | 事项 | 说明 |
 |---|---|---|
 | ✅ 高 | **规则引擎(20 分)** | **已完成(2026-08-13)**,详见 5.7 |
-| 🔴 高 | **摄像头 5 接口** | 前端已调用:`/api/camera/start_stream`、`stop_stream`、`start_record`、`stop_record`、`snapshot`;网关未实现,联调前必补 |
+| ✅ 高 | **摄像头接口** | **已完成(2026-08-13)**,方案 C 详见 5.8 |
 | ✅ 中 | 板上验证阶段三/四 | **已完成(2026-08-13,P0)** |
 | ✅ 中 | 板上验证 MQTT 心跳修复 | **已完成(2026-08-13,P0)**:空闲期不再周期性断连 |
-| 🟡 中 | 板上验证规则引擎 | 部署后板上升级 rules.yaml → reload 生效(本机已验证;build-arm.sh 已加 rules/ 同步) |
-| 🟡 中 | `/api/devices/:id` 单设备详情 | 验收标准第 2 条,简单补 |
-| 🟡 中 | WebSocket /ws | 实时推送(替代轮询);消息格式见协议定稿 |
+| ✅ 中 | 板上验证规则引擎 | **已完成(2026-08-13)**:板上实测 T2/T3/T4 全过 |
+| 🟡 中 | 板上验证摄像头 | **已完成(2026-08-13)**:插摄像头后真机测通推流/抓拍/录像(见 5.8 验证证据) |
+| ✅ 中 | `/api/devices/:id` 单设备详情 | **已完成(2026-08-13)**,详见 5.9 |
+| ✅ 中 | `POST /api/actuators/:id/set` 单执行器 | **已完成(2026-08-13)**,详见 5.9(老师验收 3.2.5#5) |
+| ✅ 中 | WebSocket /ws | **已完成(2026-08-13)**,详见 5.10(阶段三验收 3.3.7#7) |
 | 🟢 低 | feature/device 开 PR 合 main | 阶段四落袋 |
 
-> P0(2026-08-13)已完成:6 个提交已 push;板上部署验证通过(含 MQTT 心跳修复)。
+> P0(2026-08-13)已完成:6 个提交已 push;板上部署验证通过(含 MQTT 心跳修复)。P1(规则引擎)、P2(摄像头)均已完成本机/板上验证,见 5.7/5.8。
 
 **⏳ 待定义:规则引擎的 id → MQTT 字段路径映射(写规则引擎前必做)**
 - 现状:两套标识并存——注册表 id(`temp_1`/`led_1`...)vs MQTT 字段(`$.body.data.temp`/`body.led_on`)
@@ -339,6 +420,40 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 - 可选升级:`sudo apt install clangd-12` + `update-alternatives`(升级后 `.clangd` 配置才生效,不升级也不影响,根目录 DB 方案对老版本同样有效)
 
 **git 状态提醒**:本轮改动(src 修复 + CMakeLists + .gitignore)均未提交;`build-arm.sh` 有一处用户自己的未提交改动(部署时同步 `config/devices/` + 验证 `/api/devices`),提交前注意区分。
+
+### ✅ 2026-08-13 全代码审查(规则引擎 + 摄像头新增代码)
+
+> 范围:新增 rule_engine(452 行)、camera_manager(264 行)、main.cpp 集成(484 行),编译通过
+
+**结论:新增代码质量高,无功能性 bug ✅**
+
+| 文件 | 评价 |
+|---|---|
+| rule_engine.h/.cpp | ✅ 优秀:映射表(方案 A 落地)、双重校验(映射表+注册表)、边沿触发、热重载保留 enabled、json_escape |
+| camera_manager.h/.cpp | ✅ 优秀:fork+execvp(非 system 防注入)、子进程关 fd、僵尸收割、wget/ffmpeg 零转码 |
+| main.cpp 集成 | ✅ 规范:规则/摄像头接入 HttpContext、on_action 回调、reap_children 定时器 |
+
+**修复(注释过期,非 bug)**:
+- main.cpp 头部注释"阶段 1-3"→"阶段 1-8 全部集成";数据流注释去掉"WS"(未实现)
+
+**当前代码全貌**:15 源文件 + main.cpp,覆盖阶段 0-8(环境/骨架/配置/MQTT/设备/注册表/规则引擎/摄像头),全部本机验证通过,规则引擎+摄像头板上真机验证通过。
+
+### ✅ 2026-08-13 全代码审查(5.9 设备接口补全)
+
+> 范围:5.9 新增的 `/api/devices/:id` + `/api/actuators/:id/set` 路由、`build_field_envelope` 重构、`to_json_detail`/`find`/`contains`
+
+**结论:全部通过 ✅,无功能性 bug**
+
+| 文件 | 评价 |
+|---|---|
+| main.cpp 两个新路由 | ✅ 规范:方法校验、404/400/503 状态码齐全、`extract_device/actuator_id` 边界处理 |
+| device_registry `find`/`to_json_detail` | ✅ 好:线性扫描 + json_escape + online/last_seen 逻辑 |
+| control `build_field_envelope` | ✅ 好:命令信封单一来源,消除 control/rule_engine/main 三处重复组包 |
+
+**⚠️ 维护性提醒(非 bug,记录备查)**:
+- `main.cpp` 的 `actuator_primary_field`(主开关字段)与 `rule_engine.cpp` 的 `actuator_fields`(可下发字段白名单)是**两张独立映射表**,内容有重叠(led_1→led_on 等)
+- 语义不同:前者取"主开关字段"(开关语义),后者列"所有可下发字段"(全集)——**当前 3 执行器硬编码可接受**;若以后加执行器,两处都要改,易漏
+- 若嫌重复,可后续统一到公共头文件或 device_registry
 
 ### 📡 通信协议定稿(2026-08-11 盘点,唯一权威)
 
@@ -631,6 +746,7 @@ std::string env = control.build_control_envelope(body, ctx->config.device_id);
 19. **mongoose 不自动发 MQTT 心跳(PINGREQ)**:`mg_mqtt_ping()` 须应用自己定时调用。网关已加 30s 心跳定时器(2026-08-13);否则 broker 在 1.5×keepalive(90s)无消息强制断开,空闲期每 ~95s 断连重连循环
 20. **clangd 只在源文件父目录链找 `compile_commands.json`,不进 `build/` 子目录**。项目已用 CMake `copy_compile_commands` 目标把数据库复制到根目录(宿主构建时自动,已 gitignore);新装机器上先跑一次 `cmake --build build` 根目录才会出现
 21. **系统 clangd 10(ubuntu20.04)完全不读 `.clangd` 配置文件**;`.clangd` 项目配置需 clangd 12+。老版本靠根目录 compile_commands.json 自动发现,新版本靠 `.clangd` 兜底标志,两种都可用
+22. **ARM 交叉编译器(gcc 6.3 linaro)比 host gcc 9.4 严格**:range-for 里的 elaborated-type-specifier(`for (struct mg_connection *c : ...)`)会报 `warning: types may not be defined in a for-range-declaration`,host gcc 9.4 不报。**验证告警必须跑 ARM 交叉编译,不能只看 host 构建**;修复:range-for 里用 `auto *c` 而非 `struct X *c`
 
 ## 7. 从零开始:小白也能交叉编译(5 分钟)
 

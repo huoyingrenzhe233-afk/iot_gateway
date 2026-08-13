@@ -24,6 +24,8 @@ public:
                const std::string &client_id, const std::string &sub_topic);
   // 发布消息到指定 topic(仅"已连接且已订阅"时才真正发送)
   void publish(const std::string &topic, const std::string &message);
+  // 是否已连接且已订阅(发布前置条件;/api/actuators/:id/set 的 503 判断用)
+  bool is_connected() const { return conn != nullptr && subscribed_; }
   // 收到上报时的回调(阶段四接 /api/status 用),由调用方赋值
   std::function<void(const std::string &topic, const std::string &payload)>
       on_message;

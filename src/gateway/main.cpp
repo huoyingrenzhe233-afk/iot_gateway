@@ -1,23 +1,29 @@
 // ============================================================
-// 网关主程序入口(阶段 1-3)
-// 职责:启动 HTTP 服务(mongoose)+ MQTT 客户端,路由 /api/* 请求
-// 数据流:Web/Qt --HTTP--> 网关 --MQTT--> 单片机
-//       单片机 --MQTT--> 网关 --内存缓存/WS--> Web/Qt
+// 网关主程序入口(阶段 1-8 全部集成)
+// 职责:启动 HTTP 服务(mongoose)+ MQTT 客户端,路由 /api/* 请求,
+//       集成设备状态/注册表/规则引擎/摄像头管理/WebSocket 推送
+// 数据流:Web/Qt --HTTP/WS--> 网关 --MQTT--> 单片机
+//       单片机 --MQTT--> 网关 --内存缓存--> Web/Qt(HTTP 轮询 + WS 广播)
 // ============================================================
 #include "core/common/config/config.h"   // 配置加载(读 config/gateway.yaml)
+#include "core/common/json_util.h"      // json_escape(WebSocket 广播用)
 #include "core/common/logger/logger.h"   // 日志
 #include "core/common/mqtt/mqtt_client.h" // MQTT 客户端
 #include "core/control/control.h"        // 控制信封组包
+#include "core/camera/camera_manager.h"  // 摄像头管理(方案 C:mjpg-streamer MJPEG)
 #include "core/device/device.h"          // 设备状态管理(6 外设缓存)
 #include "core/device/device_registry.h" // 设备注册表(静态登记)
 #include "core/rules/rule_engine.h"      // 规则引擎(阶段七:/api/rules 系列 + 上报触发评估)
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
+#include <sys/wait.h> // waitpid:僵尸进程收割(reap_children)
 #include <mongoose.h>
 static const char *VERSION = "1.0.0"; // /api/version 返回的版本号
 static const char *kRulesPath = "config/rules/rules.yaml"; // 规则配置文件路径(阶段七,reload 时也用它)
 
 using gateway::Control;
+using gateway::CameraManager;
 using gateway::log_level_from_string;
 using gateway::Logger;
 using gateway::LogLevel;
@@ -33,6 +39,7 @@ struct HttpContext
   gateway::Device *device = nullptr;   // 设备状态缓存(供 /api/status 读)
   gateway::DeviceRegistry *registry = nullptr; // 设备注册表(供 /api/devices)
   gateway::RuleEngine *rules = nullptr; // 规则引擎(供 /api/rules 系列路由)
+  gateway::CameraManager *camera = nullptr; // 摄像头管理(供 /api/camera/* 路由)
 };
 
 // ------------------------------------------------------------
@@ -58,6 +65,130 @@ static bool extract_rule_id(const struct mg_http_message *hm,
 }
 
 // ------------------------------------------------------------
+// extract_device_id:从 /api/devices/<id> URI 里抠出 <id>
+//   例:GET /api/devices/temp_1 → out="temp_1"
+// ------------------------------------------------------------
+static bool extract_device_id(const struct mg_http_message *hm, std::string &out)
+{
+  std::string uri(hm->uri.buf, hm->uri.len);
+  const std::string prefix = "/api/devices/";
+  if (uri.size() <= prefix.size()) return false;
+  if (uri.compare(0, prefix.size(), prefix) != 0) return false;
+  out = uri.substr(prefix.size());
+  return !out.empty();
+}
+
+// ------------------------------------------------------------
+// extract_actuator_id:从 /api/actuators/<id>/set URI 里抠出 <id>
+//   例:POST /api/actuators/led_1/set → out="led_1"
+// ------------------------------------------------------------
+static bool extract_actuator_id(const struct mg_http_message *hm, std::string &out)
+{
+  std::string uri(hm->uri.buf, hm->uri.len);
+  const std::string prefix = "/api/actuators/";
+  const std::string suffix = "/set";
+  if (uri.size() <= prefix.size() + suffix.size()) return false;
+  if (uri.compare(0, prefix.size(), prefix) != 0) return false;
+  if (uri.compare(uri.size() - suffix.size(), suffix.size(), suffix) != 0)
+    return false;
+  out = uri.substr(prefix.size(), uri.size() - prefix.size() - suffix.size());
+  return !out.empty();
+}
+
+// ------------------------------------------------------------
+// actuator_primary_field:执行器 id → 主命令字段映射
+//   led_1 → led_on、motor_1 → motor_on、buzzer_1 → buzzer
+// 与 rule_engine.cpp 的 actuator_fields() 白名单一致;未知 id 返回 nullptr。
+// (为什么只映射"主"字段:老师验收示例 POST /api/actuators/led/set {"value":1}
+//  语义是"开/关该执行器",取每个执行器最直观的开关字段)
+// ------------------------------------------------------------
+static const char *actuator_primary_field(const std::string &id)
+{
+  if (id == "led_1")    return "led_on";
+  if (id == "motor_1")  return "motor_on";
+  if (id == "buzzer_1") return "buzzer";
+  return nullptr;
+}
+
+// ------------------------------------------------------------
+// 僵尸进程收割:每 5s 回收已退出的子进程(mjpg_streamer/ffmpeg/wget)
+// fork 出的子进程退出后若没人 waitpid 会留僵尸占进程表;
+// 事件循环单线程,这里用 waitpid(-1, WNOHANG) 非阻塞轮询一把收干净
+// ------------------------------------------------------------
+static void reap_children(void *arg)
+{
+  (void)arg; // 回调签名要求 void* 参数,这里用不到
+  while (waitpid(-1, NULL, WNOHANG) > 0)
+  {
+    // 循环收割,直到没有已退出子进程为止
+  }
+}
+
+// ------------------------------------------------------------
+// WebSocket 客户端列表:升级成功的连接都登记在这里,广播时逐个发
+// (单线程事件循环,无并发访问,无需加锁)
+// ------------------------------------------------------------
+static std::vector<struct mg_connection *> g_ws_clients;
+
+// ------------------------------------------------------------
+// ws_send_text:向单个 WebSocket 连接发一条文本消息
+// ------------------------------------------------------------
+static void ws_send_text(struct mg_connection *c, const std::string &s)
+{
+  mg_ws_send(c, s.data(), s.size(), WEBSOCKET_OP_TEXT);
+}
+
+// ------------------------------------------------------------
+// ws_broadcast:向所有已连接的 WebSocket 客户端广播一条文本消息
+// (阶段三核心:MQTT 消息 → 实时推送到所有前端日志窗口)
+// ------------------------------------------------------------
+static void ws_broadcast(const std::string &text)
+{
+  // 用 auto 而非 "struct mg_connection *":老 gcc(6.3 linaro)会把 range-for
+  // 里的 elaborated-type-specifier 误报为"types may not be defined"
+  for (auto *c : g_ws_clients)
+  {
+    ws_send_text(c, text);
+  }
+}
+
+// ------------------------------------------------------------
+// handle_ws_message:处理客户端发来的 WebSocket 消息(模拟 MQTT 发布)
+// 客户端格式:{"topic":"...","payload":"..."} → 网关发布到 MQTT
+// 服务端回:{type:"mqtt_pub_ack"} / {type:"error"}(老师 3.3.4 定稿)
+// ------------------------------------------------------------
+static void handle_ws_message(struct mg_connection *c, HttpContext *ctx,
+                              struct mg_ws_message *wm)
+{
+  struct mg_str json = mg_str_n(wm->data.buf, wm->data.len);
+  // 取 topic / payload 字符串(都要 free;get_str 返回 malloc 内存)
+  char *topic = mg_json_get_str(json, "$.topic");
+  char *payload = mg_json_get_str(json, "$.payload");
+
+  if (topic == nullptr)
+  {
+    free(payload); // payload 可能非空,同样要释放
+    ws_send_text(c, "{\"type\":\"error\",\"error\":\"missing_topic\"}");
+    return;
+  }
+  std::string topic_str(topic);
+  free(topic);
+  std::string payload_str = payload ? payload : "";
+  free(payload);
+
+  if (ctx->mqtt == nullptr || !ctx->mqtt->is_connected())
+  {
+    ws_send_text(c, "{\"type\":\"error\",\"error\":\"mqtt_not_connected\"}");
+    return;
+  }
+
+  // 发布到 MQTT + 回确认(老师 3.3.4:WebSocket 消息处理链路)
+  ctx->mqtt->publish(topic_str, payload_str);
+  ws_send_text(c, "{\"type\":\"mqtt_pub_ack\",\"ok\":true}");
+  LOG_INFO("ws publish: %s", topic_str.c_str());
+}
+
+// ------------------------------------------------------------
 // HTTP 请求处理器:mongoose 每个 HTTP 请求都会回调这里
 // connect   = 当前请求的连接(可回写响应)
 // event     = 事件类型(我们只关心 MG_EV_HTTP_MSG = 收到完整 HTTP 请求)
@@ -66,7 +197,43 @@ static bool extract_rule_id(const struct mg_http_message *hm,
 static void request_handler(struct mg_connection *connect, int event,
                             void *event_data)
 {
-  if (event == MG_EV_HTTP_MSG)
+  // ---- WebSocket 事件(升级后的连接走这里,不走下面的 HTTP 路由) ----
+  // 注意:ctx(fn_data)在 WS 连接上同样可用(从监听器继承,mg_ws_upgrade 不清 fn_data)
+  HttpContext *ws_ctx = static_cast<HttpContext *>(connect->fn_data);
+
+  if (event == MG_EV_WS_OPEN)
+  {
+    // 握手完成,登记为 WebSocket 客户端(老师验收:连接后 MQTT 消息实时推送)
+    g_ws_clients.push_back(connect);
+    LOG_INFO("ws client connected (total %zu)", g_ws_clients.size());
+    return;
+  }
+  if (event == MG_EV_WS_MSG)
+  {
+    struct mg_ws_message *wm = (struct mg_ws_message *)event_data;
+    handle_ws_message(connect, ws_ctx, wm);
+    return;
+  }
+  if (event == MG_EV_CLOSE)
+  {
+    // 连接关闭:从广播列表移除(HTTP 短连接也会走这里,不在列表里就跳过)
+    for (size_t i = 0; i < g_ws_clients.size(); i++)
+    {
+      if (g_ws_clients[i] == connect)
+      {
+        g_ws_clients.erase(g_ws_clients.begin() + i);
+        break;
+      }
+    }
+    LOG_INFO("ws client disconnected (total %zu)", g_ws_clients.size());
+    return;
+  }
+
+  if (event != MG_EV_HTTP_MSG)
+  {
+    return; // 其他事件(ACCEPT/READ/WRITE/WS_CTL 等)忽略
+  }
+
   {
     struct mg_http_message *hm = (struct mg_http_message *)event_data;
     // 从 mongoose 连接取出上下文(fn_data 方式,替代全局变量)
@@ -76,6 +243,9 @@ static void request_handler(struct mg_connection *connect, int event,
 
     // enable/disable 路由共用:从 /api/rules/<id>/<suffix> 抠出的规则 id
     std::string rule_id;
+    // devices/actuators 路由共用:从 URI 抠出的设备/执行器 id
+    std::string device_id_str;
+    std::string actuator_id_str;
 
     // ---- 路由表:按 URI + method 匹配(防 POST/DELETE 误触发 GET 端点) ----
 
@@ -109,6 +279,68 @@ static void request_handler(struct mg_connection *connect, int event,
       {
         mg_http_reply(connect, 500, "Content-Type: application/json\r\n",
                       "{\"error\":\"registry_not_ready\"}");
+      }
+    }
+
+    // GET /api/devices/<id> → 单设备详情(老师验收 3.2.5#2:返回单个设备详情)
+    // online/last_seen 来自 Device 缓存(收到过上报 = 在线)
+    else if (mg_match(hm->method, mg_str("GET"), NULL) &&
+             extract_device_id(hm, device_id_str))
+    {
+      std::string last_seen =
+          (ctx->device != nullptr) ? ctx->device->last_seen() : "";
+      std::string detail =
+          (ctx->registry != nullptr)
+              ? ctx->registry->to_json_detail(device_id_str, last_seen)
+              : "";
+      if (detail.empty())
+      {
+        mg_http_reply(connect, 404, "Content-Type: application/json\r\n",
+                      "{\"error\":\"device_not_found\"}");
+      }
+      else
+      {
+        mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
+                      "%s", detail.c_str());
+      }
+    }
+
+    // POST /api/actuators/<id>/set → 单执行器下发(老师验收 3.2.5#5)
+    // body {"value":1};id → 主命令字段 → 组信封 → 发布 + 缓存同步
+    // 状态码:200 成功 / 404 未知执行器 / 400 缺 value / 503 MQTT 未连接
+    else if (mg_match(hm->method, mg_str("POST"), NULL) &&
+             extract_actuator_id(hm, actuator_id_str))
+    {
+      const char *field = actuator_primary_field(actuator_id_str);
+      if (field == nullptr)
+      {
+        mg_http_reply(connect, 404, "Content-Type: application/json\r\n",
+                      "{\"error\":\"actuator_not_found\"}");
+      }
+      else if (mg_json_get_tok(mg_str_n(hm->body.buf, hm->body.len), "$.value")
+                   .len == 0)
+      {
+        mg_http_reply(connect, 400, "Content-Type: application/json\r\n",
+                      "{\"error\":\"missing value\"}");
+      }
+      else if (ctx->mqtt == nullptr || !ctx->mqtt->is_connected())
+      {
+        mg_http_reply(connect, 503, "Content-Type: application/json\r\n",
+                      "{\"ok\":false}");
+      }
+      else
+      {
+        long value = mg_json_get_long(mg_str_n(hm->body.buf, hm->body.len),
+                                      "$.value", 0);
+        std::string envelope = Control::build_field_envelope(
+            ctx->config.device_id, field, value);
+        ctx->mqtt->publish(ctx->config.mqtt_topic_cmd, envelope);
+        if (ctx->device != nullptr)
+        {
+          ctx->device->update_from_control(envelope); // 同步缓存,UI 秒响应
+        }
+        mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
+                      "{\"ok\":true}");
       }
     }
 
@@ -226,6 +458,152 @@ static void request_handler(struct mg_connection *connect, int event,
                        : "{\"ok\":false,\"message\":\"rule_not_found\"}");
     }
 
+    // ---- 摄像头路由(方案 C:mjpg-streamer 推流 + wget 抓拍 + ffmpeg 录像) ----
+    // 方法同时接受 GET 和 POST:老师给的 HTML 用 GET 直连,
+    // plan.md 写的是 POST —— 两种都认,避免前端联调踩坑
+
+    // GET/POST /api/camera/start_stream → 启动推流(fork mjpg_streamer)
+    else if (mg_match(hm->uri, mg_str("/api/camera/start_stream"), NULL) &&
+             (mg_match(hm->method, mg_str("GET"), NULL) ||
+              mg_match(hm->method, mg_str("POST"), NULL)))
+    {
+      if (ctx->camera == nullptr)
+      {
+        // 摄像头管理未初始化(防御性检查,理论上不会发生)
+        mg_http_reply(connect, 500, "Content-Type: application/json\r\n",
+                      "{\"ok\":false,\"message\":\"start_stream failed\"}");
+      }
+      else
+      {
+        bool ok = ctx->camera->start_stream();
+        mg_http_reply(connect, ok ? 200 : 500, "Content-Type: application/json\r\n",
+                      ok ? "{\"ok\":true}"
+                         : "{\"ok\":false,\"message\":\"start_stream failed\"}");
+      }
+    }
+
+    // GET/POST /api/camera/stop_stream → 停止推流(kill + waitpid)
+    else if (mg_match(hm->uri, mg_str("/api/camera/stop_stream"), NULL) &&
+             (mg_match(hm->method, mg_str("GET"), NULL) ||
+              mg_match(hm->method, mg_str("POST"), NULL)))
+    {
+      if (ctx->camera == nullptr)
+      {
+        mg_http_reply(connect, 500, "Content-Type: application/json\r\n",
+                      "{\"ok\":false,\"message\":\"stop_stream failed\"}");
+      }
+      else
+      {
+        bool ok = ctx->camera->stop_stream();
+        mg_http_reply(connect, ok ? 200 : 500, "Content-Type: application/json\r\n",
+                      ok ? "{\"ok\":true}"
+                         : "{\"ok\":false,\"message\":\"stop_stream failed\"}");
+      }
+    }
+
+    // GET/POST /api/camera/start_record → 开始录像(fork ffmpeg -c copy)
+    else if (mg_match(hm->uri, mg_str("/api/camera/start_record"), NULL) &&
+             (mg_match(hm->method, mg_str("GET"), NULL) ||
+              mg_match(hm->method, mg_str("POST"), NULL)))
+    {
+      if (ctx->camera == nullptr)
+      {
+        mg_http_reply(connect, 500, "Content-Type: application/json\r\n",
+                      "{\"ok\":false,\"message\":\"start_record failed\"}");
+      }
+      else
+      {
+        bool ok = ctx->camera->start_record();
+        mg_http_reply(connect, ok ? 200 : 500, "Content-Type: application/json\r\n",
+                      ok ? "{\"ok\":true}"
+                         : "{\"ok\":false,\"message\":\"start_record failed\"}");
+      }
+    }
+
+    // GET/POST /api/camera/stop_record → 停止录像(和 stop_stream 对称)
+    else if (mg_match(hm->uri, mg_str("/api/camera/stop_record"), NULL) &&
+             (mg_match(hm->method, mg_str("GET"), NULL) ||
+              mg_match(hm->method, mg_str("POST"), NULL)))
+    {
+      if (ctx->camera == nullptr)
+      {
+        mg_http_reply(connect, 500, "Content-Type: application/json\r\n",
+                      "{\"ok\":false,\"message\":\"stop_record failed\"}");
+      }
+      else
+      {
+        bool ok = ctx->camera->stop_record();
+        mg_http_reply(connect, ok ? 200 : 500, "Content-Type: application/json\r\n",
+                      ok ? "{\"ok\":true}"
+                         : "{\"ok\":false,\"message\":\"stop_record failed\"}");
+      }
+    }
+
+    // GET/POST /api/camera/snapshot → 抓拍一帧(wget 抓 ?action=snapshot)
+    // 成功返回文件名,前端可以拼 http://<host>:8081/snapshots/<文件名> 展示
+    else if (mg_match(hm->uri, mg_str("/api/camera/snapshot"), NULL) &&
+             (mg_match(hm->method, mg_str("GET"), NULL) ||
+              mg_match(hm->method, mg_str("POST"), NULL)))
+    {
+      if (ctx->camera == nullptr)
+      {
+        mg_http_reply(connect, 500, "Content-Type: application/json\r\n",
+                      "{\"ok\":false,\"message\":\"snapshot failed\"}");
+      }
+      else
+      {
+        std::string fn;
+        bool ok = ctx->camera->snapshot(fn);
+        if (ok)
+        {
+          mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
+                        "{\"ok\":true,\"filename\":\"%s\"}", fn.c_str());
+        }
+        else
+        {
+          mg_http_reply(connect, 500, "Content-Type: application/json\r\n",
+                        "{\"ok\":false,\"message\":\"snapshot failed\"}");
+        }
+      }
+    }
+
+    // GET/POST /api/camera/status → 状态查询(推流/录像是否在跑)
+    else if (mg_match(hm->uri, mg_str("/api/camera/status"), NULL) &&
+             (mg_match(hm->method, mg_str("GET"), NULL) ||
+              mg_match(hm->method, mg_str("POST"), NULL)))
+    {
+      bool running = (ctx->camera != nullptr) && ctx->camera->stream_running();
+      bool recording = (ctx->camera != nullptr) && ctx->camera->record_running();
+      mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
+                    "{\"running\":%s,\"recording\":%s}",
+                    running ? "true" : "false", recording ? "true" : "false");
+    }
+
+    // GET / 或 /index.html → 伺服 web/index.html(前端页面)
+    // 前端页面由网关伺服,浏览器开 http://<板子IP>:8081/ 即可;
+    // 页面里 <img> 直连 8080 的 mjpg-streamer 流,网关不代理视频数据
+    else if (mg_match(hm->uri, mg_str("/"), NULL) &&
+             mg_match(hm->method, mg_str("GET"), NULL))
+    {
+      struct mg_http_serve_opts opts = {};
+      opts.root_dir = "web"; // 资源根目录(必须非空,见 mongoose.h:1783)
+      mg_http_serve_file(connect, hm, "web/index.html", &opts);
+    }
+    else if (mg_match(hm->uri, mg_str("/index.html"), NULL) &&
+             mg_match(hm->method, mg_str("GET"), NULL))
+    {
+      struct mg_http_serve_opts opts = {};
+      opts.root_dir = "web";
+      mg_http_serve_file(connect, hm, "web/index.html", &opts);
+    }
+
+    // GET /ws → WebSocket 升级(阶段三:MQTT 消息实时推送到前端日志)
+    // 升级后连接仍走本回调(request_handler),事件变为 MG_EV_WS_* / CLOSE
+    else if (mg_match(hm->uri, mg_str("/ws"), NULL))
+    {
+      mg_ws_upgrade(connect, hm, NULL);
+    }
+
     // 其他一切路径 → 404
     else
     {
@@ -281,6 +659,14 @@ int main(int argc, char *argv[])
   bool rules_ok = g_rules.load(kRulesPath, g_registry);
   LOG_INFO("rules loaded: %zu entries (%s)", g_rules.size(),
            rules_ok ? "ok" : "FAILED");
+  // 6.7 摄像头管理(static 常驻,方案 C:mjpg-streamer 推流 + wget 抓拍 + ffmpeg 录像)
+  //     fork 出的子进程(mjpg_streamer/ffmpeg/wget)由 reap_children 定时器收割
+  static gateway::CameraManager g_camera;
+  g_camera.set_config(config.camera_device, config.camera_port);
+  LOG_INFO("camera: device=%s port=%d", config.camera_device.c_str(),
+           config.camera_port);
+  // 6.8 僵尸进程收割定时器:每 5s 回收一次已退出子进程(不阻塞事件循环)
+  mg_timer_add(&mgr, 5000, MG_TIMER_REPEAT, reap_children, nullptr); // 僵尸收割
   // 7. 注册收到上报的回调(单片机发 sensor/status 时会触发)
   //    → 更新设备状态缓存(阶段二核心:/api/status 读的就是它)
   g_mqtt.on_message = [](const std::string &topic, const std::string &payload)
@@ -288,6 +674,16 @@ int main(int argc, char *argv[])
     LOG_INFO("on_message: %s -> %s", topic.c_str(), payload.c_str());
     g_device.update_from_report(payload);
     g_rules.evaluate(payload); // 触发规则引擎评估(仅 sensor 信封生效)
+
+    // 阶段三:广播给所有 WebSocket 客户端(前端日志实时显示 MQTT 消息)
+    // 格式(老师 3.3.4):{"type":"mqtt_msg","topic":"...","payload":"..."}
+    // payload 是 JSON 字符串,嵌入外层 JSON 前要 json_escape
+    std::string msg = "{\"type\":\"mqtt_msg\",\"topic\":\"";
+    msg += gateway::json_escape(topic);
+    msg += "\",\"payload\":\"";
+    msg += gateway::json_escape(payload);
+    msg += "\"}";
+    ws_broadcast(msg);
   };
   // 7.5 规则动作回调:规则触发 → 发布命令到单片机 + 同步状态缓存
   //     和 /api/control 同款逻辑(发布 + update_from_control 两步)
@@ -306,6 +702,7 @@ int main(int argc, char *argv[])
   ctx.device = &g_device;
   ctx.registry = &g_registry;
   ctx.rules = &g_rules;
+  ctx.camera = &g_camera;
   mg_http_listen(&mgr, listen_addr, request_handler, &ctx);
   LOG_INFO("http server listening on :%d", port);
 

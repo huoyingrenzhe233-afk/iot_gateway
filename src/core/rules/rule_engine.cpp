@@ -1,9 +1,10 @@
 #include "core/rules/rule_engine.h"
+#include "core/common/json_util.h"   // json_escape(与 device_registry/main.cpp 共用)
 #include "core/common/logger/logger.h"
+#include "core/control/control.h"
 #include "core/device/device_registry.h"
 
 #include <cstdio>
-#include <ctime>
 #include <map>
 #include <mongoose.h>
 #include <string>
@@ -53,39 +54,6 @@ namespace gateway {
             {"buzzer_1", {"buzzer"}},
         };
         return m;
-    }
-
-    // ------------------------------------------------------------
-    // json_escape:JSON 字符串转义(防规则名/字段里的引号、反斜杠破坏 JSON)
-    // 与 device_registry.cpp 的 json_escape 逻辑保持一致
-    // ------------------------------------------------------------
-    static std::string json_escape(const std::string &s)
-    {
-        std::string out;
-        out.reserve(s.size() + 8);
-        for (char c : s)
-        {
-            switch (c)
-            {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20)
-                {
-                    char buf[8];
-                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-                    out += buf;
-                }
-                else
-                {
-                    out += c;
-                }
-            }
-        }
-        return out;
     }
 
     // ------------------------------------------------------------
@@ -353,32 +321,14 @@ namespace gateway {
 
     // ------------------------------------------------------------
     // fire:组控制命令信封并回调 on_action(不下发=哑弹,所以必须回调)
-    //
-    // 信封格式与 control.cpp build_control_envelope 完全一致(协议定稿):
+    // 信封格式复用 Control::build_field_envelope(协议格式单一来源):
     //   {"type":"cmd","dev":"mcu01","ts":"2026-08-13 10:00:00","body":{"buzzer":1}}
-    // 区别:这里只下发 rule.field 这一个字段(规则引擎只负责单一动作),
-    // 不经过 Control 类——那是 /api/control 的组包工具,语义不同。
+    // 只下发 rule.field 这一个字段(规则引擎只负责单一动作)。
     // ------------------------------------------------------------
     void RuleEngine::fire(const Rule &rule)
     {
-        char ts[32];
-        std::time_t now = std::time(nullptr);
-        struct tm tm = {};
-        localtime_r(&now, &tm);
-        strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm);
-
-        std::string envelope;
-        envelope.reserve(96);
-        envelope += "{\"type\":\"cmd\",\"dev\":\"";
-        envelope += device_id_;
-        envelope += "\",\"ts\":\"";
-        envelope += ts;
-        envelope += "\",\"body\":{\"";
-        envelope += rule.field;
-        envelope += "\":";
-        envelope += std::to_string(rule.value);
-        envelope += "}}";
-
+        std::string envelope =
+            Control::build_field_envelope(device_id_, rule.field, rule.value);
         // 动作回调:main.cpp 里赋值 = 发布到 MQTT + 同步状态缓存
         if (on_action)
         {
