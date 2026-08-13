@@ -43,6 +43,9 @@ namespace gateway
         // 返回:[{"id":"temp_1","kind":"sensor","protocol":"mqtt","description":"温度(温湿度传感器)"},...]
         std::string to_json_list() const;
 
+        // 判断某 id 是否已登记;kind 传 "sensor"/"actuator" 精确匹配,空串=任意类型
+        bool contains(const std::string &id, const std::string &kind) const;
+
     private:
         std::vector<DeviceEntry> entries_; // 全部登记(传感器+执行器)
     };

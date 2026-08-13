@@ -101,6 +101,24 @@ namespace gateway
     }
 
     // ------------------------------------------------------------
+    // contains:判断某 id 是否已登记(规则引擎加载校验的权威来源)
+    // kind 传 "sensor"/"actuator" 精确匹配,空串 = 任意类型
+    // 找到第一个匹配即返回 true(登记表条目很少,线性扫描足够)
+    // ------------------------------------------------------------
+    bool DeviceRegistry::contains(const std::string &id,
+                                  const std::string &kind) const
+    {
+        for (const DeviceEntry &e : entries_)
+        {
+            if (e.id == id && (kind.empty() || e.kind == kind))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // ------------------------------------------------------------
     // to_json_list:生成 /api/devices 的 JSON 数组(手拼,不引第三方库)
     // 所有字符串字段过 json_escape,防特殊字符破坏 JSON
     // ------------------------------------------------------------

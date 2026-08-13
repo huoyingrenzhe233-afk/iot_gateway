@@ -18,6 +18,7 @@ add_executable(gateway
     src/core/control/control.cpp
     src/core/device/device.cpp
     src/core/device/device_registry.cpp
+    src/core/rules/rule_engine.cpp
     third_party/mongoose.c
 )
 target_include_directories(gateway PRIVATE

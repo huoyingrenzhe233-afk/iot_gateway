@@ -62,6 +62,10 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 - `src/core/device/`:`Device` 状态缓存 + `DeviceRegistry` 注册表 + /api/status + /api/devices
 - 上报/回执/控制三链验证通过;部分字段下发修复(详见 5.5)
 
+### ✅ 阶段 7(规则引擎)— 完成(2026-08-13,本机全链路 + 真 mosquitto 端到端验证)
+- `src/core/rules/`:`RuleEngine`(yaml 加载/校验/边沿触发评估/启停/热重载)+ `/api/rules` 系列 4 个 API
+- 详见 5.7 节;P1 设计决策(映射表方案 A)已定稿落地
+
 ### ⏳ 未开始
 - 规则引擎(20 分,待办 5.6)、WebSocket /ws、摄像头接口、板上验证阶段 3/4、/api/devices/:id
 
@@ -227,14 +231,46 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 
 **一致性铁律**:规则引擎 yaml 的 sensor_id/actuator_id 必须与 devices yaml 的 id 一字不差(教程 5.2.8 强调)
 
+### ✅ 5.7 阶段七:规则引擎 — **已完成(2026-08-13,本机全链路 + 真 mosquitto 端到端验证)**
+
+> 老师验收 20 分项;唯一"运行时可动态改"的配置。设计决策由用户拍板:映射表方案 A、单条件、演示场景自定。
+
+**文件**:
+- 新增 `src/core/rules/rule_engine.h/.cpp`(452 行):`Rule` 结构体 + `RuleEngine` 类
+- 新增 `config/rules/rules.yaml`:4 条演示规则(高温报警/解除 + 暗光开灯/亮光关灯,两对成对规则)
+- `device_registry` 加 `contains(id, kind)`(规则校验的权威来源)
+- `main.cpp` 接入:HttpContext.rules、启动加载、on_message 里 `evaluate(payload)`、`on_action` 回调(publish + update_from_control)、4 条路由
+- `CMakeLists.txt` 加 rule_engine.cpp;`build-arm.sh --deploy` 已加 `config/rules/` 同步 + `/api/rules` 验证
+
+**核心机制**:
+1. **边沿触发(上升沿)**:条件从"不满足→满足"的瞬间才下发一次动作;持续满足不重复下发(防 2s 上报刷爆 MQTT)。恢复规则(如 temp_alarm_off)负责回退。**首次上报即满足会立即触发一次(初始状态同步,设计行为非 bug)**
+2. **加载校验(防哑弹)**:id 非空不重复;sensor_id 在映射表+注册表;op ∈ {> < >= <= ==};actuator_id 在映射表+注册表;field 在执行器字段白名单。非法规则 LOG_WARN 跳过
+3. **热重载 reload**:重读 yaml 整体替换;保留同名规则的运行时 enabled 状态;解析失败保留旧规则
+4. **enable/disable**:运行时内存标志,API 改,reload 不丢
+5. **映射表(方案 A 落地)**:传感器 4 条(temp_1→$.body.data.temp 等)+ 执行器 3 条白名单(led_1→{led_on,led_br} 等)
+
+**API(实测通过)**:
+- `GET /api/rules` → `[{"id","name","enabled","when":{sensor,op,value},"then":{actuator,field,value}}]`
+- `POST /api/rules/reload` → `{"ok":true}` / `{"ok":false,"message":"reload failed"}`
+- `POST /api/rules/:id/enable|disable` → 200 `{"ok":true}` / 404 `{"ok":false,"message":"rule_not_found"}`
+- 路由顺序铁律:reload 必须排在 :id/enable、:id/disable 之前(否则 reload 被误解析为 id)
+
+**验证证据**:
+- 单元测试 21 项全过(边沿/恢复/停用/垃圾输入/非法规则/重载语义)
+- 真 mosquitto 端到端:mosquitto_pub 发 temp=35 → 网关下发 `{"body":{"buzzer":1}}` ✓;temp=36 无重复 ✓;temp=28 → `{"body":{"buzzer":0}}` ✓
+- curl 实测 4 个 API + /api/status、/api/devices 回归 ✓
+
+**规则触发数据流**:`sensor 上报 → on_message → update_from_report(缓存) + evaluate(规则) → 边沿满足 → fire 组 cmd 信封 → on_action → publish(dev/mcu01/cmd) + update_from_control(缓存同步)`
+
 ### ⏳ 5.6 待办清单(按优先级)
 
 | 优先级 | 事项 | 说明 |
 |---|---|---|
-| 🔴 高 | **规则引擎(20 分)** 🔄 进行中 | 4 个 API:/api/rules、reload、:id/enable、:id/disable;**先定"id→MQTT 字段映射"**(见下方待定义) |
+| ✅ 高 | **规则引擎(20 分)** | **已完成(2026-08-13)**,详见 5.7 |
 | 🔴 高 | **摄像头 5 接口** | 前端已调用:`/api/camera/start_stream`、`stop_stream`、`start_record`、`stop_record`、`snapshot`;网关未实现,联调前必补 |
 | ✅ 中 | 板上验证阶段三/四 | **已完成(2026-08-13,P0)** |
 | ✅ 中 | 板上验证 MQTT 心跳修复 | **已完成(2026-08-13,P0)**:空闲期不再周期性断连 |
+| 🟡 中 | 板上验证规则引擎 | 部署后板上升级 rules.yaml → reload 生效(本机已验证;build-arm.sh 已加 rules/ 同步) |
 | 🟡 中 | `/api/devices/:id` 单设备详情 | 验收标准第 2 条,简单补 |
 | 🟡 中 | WebSocket /ws | 实时推送(替代轮询);消息格式见协议定稿 |
 | 🟢 低 | feature/device 开 PR 合 main | 阶段四落袋 |
@@ -245,6 +281,8 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 - 现状:两套标识并存——注册表 id(`temp_1`/`led_1`...)vs MQTT 字段(`$.body.data.temp`/`body.led_on`)
 - 规则引擎 yaml 引用 sensor_id/actuator_id(注册表 id),取值需对应 MQTT 字段路径——**目前无映射**
 - 两种解法(二选一):A. 加映射表(7 条);B. 规则直接引用 MQTT 字段名(简单,偏离"规则引用设备 id"设计)
+
+> ✅ **已定稿(2026-08-13,方案 A)**:`rule_engine.cpp` 内两张静态映射表——传感器 id→上报 JSON 路径(4 条)+ 执行器 id→允许命令字段白名单(3 条)。规则加载时双重校验:映射表 + 注册表 `contains()`。详见 5.7 节。
 
 ### ✅ 2026-08-12 全代码审查(最终轮)
 
