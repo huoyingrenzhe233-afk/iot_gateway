@@ -1,0 +1,16 @@
+# 执行器登记表(设备注册表静态配置,2026-08-12 与单片机侧确认)
+# 6 外设中的 3 个执行器
+# ⚠️ 一致性铁律:规则 yaml 的 actuator_id 必须与本文件 id 一字不差
+actuators:
+  - id: led_1
+    kind: actuator
+    protocol: mqtt
+    description: LED灯(led_on/led_br)
+  - id: motor_1
+    kind: actuator
+    protocol: mqtt
+    description: 电机(motor_on/motor_sp/motor_dir)
+  - id: buzzer_1
+    kind: actuator
+    protocol: mqtt
+    description: 蜂鸣器(buzzer)

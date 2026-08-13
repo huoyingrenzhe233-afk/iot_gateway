@@ -29,12 +29,14 @@ if [ "$1" = "--deploy" ]; then
     echo "==> [4/5] 部署到板子 $BOARD_IP"
     ssh -o BatchMode=yes root@$BOARD_IP "pkill -x gateway || true; sleep 1" 2>/dev/null
     scp -o BatchMode=yes build-arm/gateway root@$BOARD_IP:/root/gateway
-    echo "==> [5/5] 传输配置文件"
+    echo "==> [5/5] 传输配置文件(gateway.yaml + devices/ 设备注册表 + rules/ 规则)"
     ssh -o BatchMode=yes root@$BOARD_IP "mkdir -p /root/config"
     scp -o BatchMode=yes config/gateway.yaml root@$BOARD_IP:/root/config/gateway.yaml
+    scp -o BatchMode=yes -r config/devices root@$BOARD_IP:/root/config/  # 设备注册表(sensors/actuators.yaml)
+    scp -o BatchMode=yes -r config/rules root@$BOARD_IP:/root/config/    # 规则引擎(rules.yaml)
     ssh -o BatchMode=yes root@$BOARD_IP "nohup /root/gateway $PORT > /root/gateway.out 2>&1 & sleep 1"
-    echo "==> 验证 /api/health + /api/version:"
-    ssh -o BatchMode=yes root@$BOARD_IP "wget -q -O- http://127.0.0.1:$PORT/api/health; echo; wget -q -O- http://127.0.0.1:$PORT/api/version; echo"
+    echo "==> 验证 /api/health + /api/version + /api/devices + /api/rules:"
+    ssh -o BatchMode=yes root@$BOARD_IP "wget -q -O- http://127.0.0.1:$PORT/api/health; echo; wget -q -O- http://127.0.0.1:$PORT/api/version; echo; wget -q -O- http://127.0.0.1:$PORT/api/devices; echo; wget -q -O- http://127.0.0.1:$PORT/api/rules; echo"
     echo ""
     echo "✅ 完成"
 else

@@ -1,0 +1,20 @@
+# 传感器登记表(设备注册表静态配置,2026-08-12 与单片机侧确认)
+# 6 外设中的 4 个传感器(温湿度一体出 2 个测量字段 → 2 条登记)
+# ⚠️ 一致性铁律:规则 yaml 的 sensor_id 必须与本文件 id 一字不差
+sensors:
+  - id: temp_1
+    kind: sensor
+    protocol: mqtt
+    description: 温度(温湿度传感器)
+  - id: humi_1
+    kind: sensor
+    protocol: mqtt
+    description: 湿度(温湿度传感器)
+  - id: light_1
+    kind: sensor
+    protocol: mqtt
+    description: 光照(光敏传感器)
+  - id: ir_1
+    kind: sensor
+    protocol: mqtt
+    description: 红外(红外传感器)

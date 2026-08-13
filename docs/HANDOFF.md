@@ -17,7 +17,25 @@
 老师规范:`/home/kkk/Desktop/standard/project-plan.md`(Windows 桌面映射,见下)
 API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` `/api/status` `/api/control` `/api/rules` `/api/camera/*` + `/ws`
 协议信封:`{type, dev, ts, body}`;MQTT topic:`dev/mcu01/report`(上)/`dev/mcu01/cmd`(下)
-控制 payload:`led_on/led_br/motor_on/motor_sp/motor_dir/buzzer`;设备固定 mcu01;zigbee 必做透传
+控制 payload:`led_on/led_br/motor_on/motor_sp/motor_dir/buzzer`;设备固定 mcu01
+
+**硬件设备清单(2026-08-12 用户确认,共 6 个)**:
+| 设备 | 类型 | 上报/控制 |
+|---|---|---|
+| LED 灯 | 执行器 | 控制(led_on/led_br) |
+| 温湿度传感器 | 传感器 | 上报(temp/humi) |
+| 蜂鸣器 | 执行器 | 控制(buzzer) |
+| 光敏传感器 | 传感器 | 上报(light) |
+| 红外传感器 | 传感器 | 上报(ir) |
+| 风扇电机 | 执行器 | 控制(motor_on/motor_sp/motor_dir) |
+
+**📡 双通道通信设计(2026-08-12 用户澄清,重要!)**
+- 网关 ↔ 单片机之间**有两种可切换的通信通道**:① MQTT(WiFi/以太网)② ZigBee(无线模块)
+- **Web/Qt 界面有"切换按钮"**,选择当前用哪个通道(老师方案的通道冗余设计)
+- 通道切换 = 网关侧抽象层(`Channel` 接口,策略模式):`send_to_mcu(msg)` 内部判断当前通道 → MQTT 发布 或 ZigBee 发送
+- **⚠️ 待确认(硬件前提)**:RK3568 板子是否有 zigbee 模块?(`ls /dev/ttyUSB* /dev/ttyS* /dev/ttyACM*`);老师 plan.md 中 zigbee 通道的具体 API/协议描述
+- **⚠️ 待确认**:zigbee 通道是"真做"(网关直连 zigbee 设备/协调器)还是"简化"(单片机侧 zigbee,网关只走 MQTT)?
+- **当前策略:先做扎实 MQTT 通道(阶段三已完成),zigbee 通道等硬件/老师要求确认后再设计抽象层**
 
 ## 2. 当前进度
 
@@ -33,9 +51,23 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 - **板上实测(交叉编译版)**:`/api/health` → HTTP 200 `{"status":"ok"}`;`/xxx` → 404 ✅
 - ⚠️ **端口冲突**:板上 8080 被 mjpg_streamer(摄像头)占用,`main.cpp` 已支持 `argv[1]` 传端口,板上用 `gateway 8081`
 
+### ✅ 阶段 2(配置加载)— 完成(2026-08-11)
+- `config/gateway.yaml` + `src/core/common/config/`(yaml-cpp 加载)+ `/api/version` → `{"version":"1.0.0"}`(本机 + 板上验证)
+
+### ✅ 阶段 3(MQTT 客户端)— 完成(2026-08-12,本机全链路验证)
+- `src/core/common/mqtt/`:`MqttClient`(连接/订阅/发布/断线重连)+ `/api/control` 下行(control.cpp 组信封)
+- 控制链 + 上报链双向真实 MQTT 闭环验证(独立 mosquitto_sub/pub 捕获证据)
+
+### ✅ 阶段 4(设备状态管理)— 完成(2026-08-12,本机全链路验证)
+- `src/core/device/`:`Device` 状态缓存 + `DeviceRegistry` 注册表 + /api/status + /api/devices
+- 上报/回执/控制三链验证通过;部分字段下发修复(详见 5.5)
+
+### ✅ 阶段 7(规则引擎)— 完成(2026-08-13,本机全链路 + 真 mosquitto 端到端验证)
+- `src/core/rules/`:`RuleEngine`(yaml 加载/校验/边沿触发评估/启停/热重载)+ `/api/rules` 系列 4 个 API
+- 详见 5.7 节;P1 设计决策(映射表方案 A)已定稿落地
+
 ### ⏳ 未开始
-- MQTT 客户端(阶段三 5.4)、设备管理、WebSocket、规则引擎、摄像头代理
-- ✅ 已完成:config 加载 + `/api/version`(5.2/5.3)
+- 规则引擎(20 分,待办 5.6)、WebSocket /ws、摄像头接口、板上验证阶段 3/4、/api/devices/:id
 
 ## 3. 环境信息
 
@@ -62,6 +94,7 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 3. 配置用 yaml-cpp(**板上已装 0.5.2**,sysroot 已装同版本 + Boost 1.63.0 头文件),日志/配置等基础组件放 `src/core/common/`(注意:实际目录是 `src/core/common/logger/` 和 `src/core/common/config/`,带子目录)
 4. 老师参考工程:`/home/kkk/Desktop/web_project/Iot-gateway/IotEdgeGateway`(只借鉴:file_logger.cpp / rule_engine.hpp / development.yaml)
 5. Windows 桌面文档(教程 v2.0 等 3 份)在 `/mnt/c/Users/ThinkPad/Desktop/`(WSL 里直接读)
+6. **双通道决策(2026-08-12)**:网关↔单片机支持 MQTT/ZigBee 双通道切换(Web/Qt 有切换按钮)。**当前只做 MQTT 通道(已通);zigbee 通道待硬件确认后,用 Channel 抽象层(策略模式)实现**——`send_to_mcu(msg)` 内部按当前通道分发。不提前过度设计
 
 ## 5. 下一步(按顺序)
 
@@ -84,7 +117,8 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 - ⚠️ 部署注意:程序启动时读 `config/gateway.yaml`(相对路径),**config 目录必须和 gateway 一起传到板上**(已部署到 `/root/config/gateway.yaml`);`build-arm.sh --deploy` **当前不传 config**,需手动 scp 或后续改进脚本
 - 端口逻辑:`argv[1]` 优先于 config 里的 `server.port`;板上用 `8081` 避开摄像头的 8080
 
-### 🔍 mqtt_client 代码审查报告(2026-08-11,接入前必读)
+### 🔍 mqtt_client 代码审查报告(2026-08-11)— ✅ 问题已全部修复(2026-08-12)
+> 历史审查记录,保留备查;所有问题已按修复建议处理完毕(见 5.4 阶段三完成状态)
 
 > 审查对象:`src/core/common/mqtt/mqtt_client.h/.cpp`(用户草稿,已修到能编译)
 > 方法:逐行核对 mongoose 7.20 源码,非推测
@@ -137,7 +171,8 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 4. `MG_EV_MQTT_OPEN` 里检查 `*(uint8_t*)ev_data == 0` 再订阅,否则 LOG_ERROR
 5. `connect` 开头防重入:已连接则先关旧连接
 
-### ⏳ 5.4 阶段三:MQTT 客户端 — **待执行(委派给 WSL AI)**
+### ✅ 5.4 阶段三:MQTT 客户端 — **已完成(2026-08-12,本机全链路验证通过)**
+> 任务 1(MqttClient)✅;**任务 2(/api/control)✅ 本机真实 MQTT 闭环验证**;任务 3 本机 ✅(板上验证见 5.5)
 > 目标:网关作为 MQTT 客户端连板上 mosquitto,打通"网页 → 网关 → 单片机"控制链和"单片机 → 网关 → 网页"上报链。
 > 参考:`third_party/mongoose.h` 2874-2917 行(MQTT API)。
 
@@ -173,6 +208,137 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 2. 板上:交叉编译部署后同样验证通过
 3. 网关断线重连:kill 板上 mosquitto 再起,网关能自动重连并恢复订阅
 4. 完成后提交分支 `feature/mqtt`(从最新 main 开出),更新本文档 5.4 为 ✅
+
+### ✅ 5.5 阶段四:设备状态管理 + 注册表 — **已完成(2026-08-12,本机全链路验证)**
+> 目标:单片机上报 → 网关缓存 → 前端轮询 /api/status;设备清单 → /api/devices
+
+**功能**:
+- ✅ `src/core/device/device.{h,cpp}`:6 外设状态缓存
+  - `update_from_report`:解析 sensor 上报(4 传感器)+ status 回执(items 数组,长短名兼容)
+  - `update_from_control`:控制命令缓存(UI 秒响应,回执校准;支持部分字段下发)
+  - `get_status_json`:/api/status 的 10 字段聚合(4 传感器字符串 + 6 执行器数值)
+- ✅ `src/core/device/device_registry.{h,cpp}`:静态登记表,读 config/devices/*.yaml
+  - sensors.yaml(4 传感器:temp_1/humi_1/light_1/ir_1)+ actuators.yaml(3 执行器:led_1/motor_1/buzzer_1)
+  - `json_escape` 转义 + `kind` 校验(sensor/actuator)
+- ✅ main.cpp 集成:/api/status + /api/devices 路由;on_message → update_from_report;HttpContext 加 device/registry 指针(fn_data)
+- ✅ 实测:上报 → /api/status 更新;回执 → 执行器校准;控制 → 缓存秒响应;部分字段下发保持其他字段;交叉编译 aarch64 ✅
+
+**已解决的解析坑(记录备查)**:
+- type 用 `mg_json_get_str`(get_tok 带引号);数字值用 `mg_json_get_num`(get_str 只认字符串)
+- 回执遍历越界用 `mg_json_get_tok` 节点存在判断(不能用 -1,与合法值冲突)
+- 部分字段下发用 tok 存在性判断(不能用默认值 0,会重置其他字段)
+- `%g` 会把 55.0 显示成 55(可接受;若严格要求小数位改固定格式)
+
+**一致性铁律**:规则引擎 yaml 的 sensor_id/actuator_id 必须与 devices yaml 的 id 一字不差(教程 5.2.8 强调)
+
+### ✅ 5.7 阶段七:规则引擎 — **已完成(2026-08-13,本机全链路 + 真 mosquitto 端到端验证)**
+
+> 老师验收 20 分项;唯一"运行时可动态改"的配置。设计决策由用户拍板:映射表方案 A、单条件、演示场景自定。
+
+**文件**:
+- 新增 `src/core/rules/rule_engine.h/.cpp`(452 行):`Rule` 结构体 + `RuleEngine` 类
+- 新增 `config/rules/rules.yaml`:4 条演示规则(高温报警/解除 + 暗光开灯/亮光关灯,两对成对规则)
+- `device_registry` 加 `contains(id, kind)`(规则校验的权威来源)
+- `main.cpp` 接入:HttpContext.rules、启动加载、on_message 里 `evaluate(payload)`、`on_action` 回调(publish + update_from_control)、4 条路由
+- `CMakeLists.txt` 加 rule_engine.cpp;`build-arm.sh --deploy` 已加 `config/rules/` 同步 + `/api/rules` 验证
+
+**核心机制**:
+1. **边沿触发(上升沿)**:条件从"不满足→满足"的瞬间才下发一次动作;持续满足不重复下发(防 2s 上报刷爆 MQTT)。恢复规则(如 temp_alarm_off)负责回退。**首次上报即满足会立即触发一次(初始状态同步,设计行为非 bug)**
+2. **加载校验(防哑弹)**:id 非空不重复;sensor_id 在映射表+注册表;op ∈ {> < >= <= ==};actuator_id 在映射表+注册表;field 在执行器字段白名单。非法规则 LOG_WARN 跳过
+3. **热重载 reload**:重读 yaml 整体替换;保留同名规则的运行时 enabled 状态;解析失败保留旧规则
+4. **enable/disable**:运行时内存标志,API 改,reload 不丢
+5. **映射表(方案 A 落地)**:传感器 4 条(temp_1→$.body.data.temp 等)+ 执行器 3 条白名单(led_1→{led_on,led_br} 等)
+
+**API(实测通过)**:
+- `GET /api/rules` → `[{"id","name","enabled","when":{sensor,op,value},"then":{actuator,field,value}}]`
+- `POST /api/rules/reload` → `{"ok":true}` / `{"ok":false,"message":"reload failed"}`
+- `POST /api/rules/:id/enable|disable` → 200 `{"ok":true}` / 404 `{"ok":false,"message":"rule_not_found"}`
+- 路由顺序铁律:reload 必须排在 :id/enable、:id/disable 之前(否则 reload 被误解析为 id)
+
+**验证证据**:
+- 单元测试 21 项全过(边沿/恢复/停用/垃圾输入/非法规则/重载语义)
+- 真 mosquitto 端到端:mosquitto_pub 发 temp=35 → 网关下发 `{"body":{"buzzer":1}}` ✓;temp=36 无重复 ✓;temp=28 → `{"body":{"buzzer":0}}` ✓
+- curl 实测 4 个 API + /api/status、/api/devices 回归 ✓
+
+**规则触发数据流**:`sensor 上报 → on_message → update_from_report(缓存) + evaluate(规则) → 边沿满足 → fire 组 cmd 信封 → on_action → publish(dev/mcu01/cmd) + update_from_control(缓存同步)`
+
+### ⏳ 5.6 待办清单(按优先级)
+
+| 优先级 | 事项 | 说明 |
+|---|---|---|
+| ✅ 高 | **规则引擎(20 分)** | **已完成(2026-08-13)**,详见 5.7 |
+| 🔴 高 | **摄像头 5 接口** | 前端已调用:`/api/camera/start_stream`、`stop_stream`、`start_record`、`stop_record`、`snapshot`;网关未实现,联调前必补 |
+| ✅ 中 | 板上验证阶段三/四 | **已完成(2026-08-13,P0)** |
+| ✅ 中 | 板上验证 MQTT 心跳修复 | **已完成(2026-08-13,P0)**:空闲期不再周期性断连 |
+| 🟡 中 | 板上验证规则引擎 | 部署后板上升级 rules.yaml → reload 生效(本机已验证;build-arm.sh 已加 rules/ 同步) |
+| 🟡 中 | `/api/devices/:id` 单设备详情 | 验收标准第 2 条,简单补 |
+| 🟡 中 | WebSocket /ws | 实时推送(替代轮询);消息格式见协议定稿 |
+| 🟢 低 | feature/device 开 PR 合 main | 阶段四落袋 |
+
+> P0(2026-08-13)已完成:6 个提交已 push;板上部署验证通过(含 MQTT 心跳修复)。
+
+**⏳ 待定义:规则引擎的 id → MQTT 字段路径映射(写规则引擎前必做)**
+- 现状:两套标识并存——注册表 id(`temp_1`/`led_1`...)vs MQTT 字段(`$.body.data.temp`/`body.led_on`)
+- 规则引擎 yaml 引用 sensor_id/actuator_id(注册表 id),取值需对应 MQTT 字段路径——**目前无映射**
+- 两种解法(二选一):A. 加映射表(7 条);B. 规则直接引用 MQTT 字段名(简单,偏离"规则引用设备 id"设计)
+
+> ✅ **已定稿(2026-08-13,方案 A)**:`rule_engine.cpp` 内两张静态映射表——传感器 id→上报 JSON 路径(4 条)+ 执行器 id→允许命令字段白名单(3 条)。规则加载时双重校验:映射表 + 注册表 `contains()`。详见 5.7 节。
+
+### ✅ 2026-08-12 全代码审查(最终轮)
+
+> 审查范围:全部 13 个源文件(config/logger/mqtt/control/device/registry/main),编译通过
+
+**结论:全部通过 ✅**(config/logger/mqtt/device/device_registry/main 均无新问题)
+
+| 发现 | 处理 |
+|---|---|
+| control.h 第 15 行注释还写 `body`(代码已是 payload) | ✅ 已修注释 |
+| logger 线程安全(级别检查在锁内) | ✅ 已确认(之前修过) |
+| device 部分字段/回执遍历 | ✅ 已确认(之前修过) |
+| registry json_escape/kind 校验 | ✅ 已确认(之前修过) |
+
+**当前代码状态**:13 文件 1196 行,全部功能本机实测通过,交叉编译 aarch64 通过,无已知 bug。
+
+### ✅ 2026-08-13 全代码审查 + 修复轮(本机验证全部通过)
+
+> 范围:全部源文件重读 + `cmake --build build` 通过 + LSP 0 诊断。上一轮(08-12)结论"无已知 bug"已被本轮更新。
+
+**已修复(4 项代码 + 1 项稳健性 + 1 项重大 MQTT 问题)**:
+
+| # | 文件 | 修复 |
+|---|---|---|
+| 1 | `config.h` | `mqtt_broker` 默认值补 `mqtt://` 前缀(与 gateway.yaml 对齐;yaml 缺失时默认值也能连) |
+| 2 | `main.cpp` | 4 个 GET 端点(`/api/version` `/api/health` `/api/devices` `/api/status`)加 `mg_match(method, "GET")` 校验,非 GET 落 404 |
+| 3 | `mqtt_client.cpp` | `mg_mqtt_pub` 返回值检查:0=失败 `LOG_ERROR`,成功带 packet_id `LOG_INFO`(注:mongoose 实现极晚期失败可能仍返回非 0,按文档契约判 0) |
+| 4 | `control.cpp` | include 尖括号 → 双引号,风格统一 |
+| 5 | `device.cpp` | status 回执循环重构(详见下) |
+| 6 | `mqtt_client.h/.cpp` | **MQTT keepalive 心跳修复**(详见下,解决周期性断连) |
+
+**用户明确不做的(非商业项目)**:`/api/control` 鉴权、日志注入过滤——已讨论,无需处理。
+
+**status 回执循环重构(device.cpp)**
+- 原逻辑:用 `items[i].value` 存在性当终止条件 → 把"数组到头"和"某项缺 value"两件事混为一谈。某项缺 value → 误判数组结束 → **后续所有项被静默丢弃**
+- 新逻辑两步分离:① `items[i]` 本身不存在 → break(数组到头);② value 缺失 → `LOG_WARN` + continue(只跳过该项)
+- 附带好处:缺 value 的项被跳过(状态保持原值),不会被 `mg_json_get_long` 默认值 0 误清零
+- A/B 验证:旧版中间项缺 value 时 `motor_on` 丢失(0)FAIL;新版 `motor_on=1` PASS;正常报文行为不变
+- 循环上限 16 的语义:防御性保险丝(防终止条件失效死循环),**不是设计循环次数**;正常数组 N 项只跑 N+1 次(多一次探测数组末尾)
+
+**🔴 MQTT 周期性断连根因与修复(重大)**
+- 现象(板上日志):空闲期每 ~95s 断连一次,5s 后自动重连,循环往复
+- 根因链:① `opts.keepalive = 60` 只写进 CONNECT 报文(承诺),② mongoose **不自动发 PINGREQ**(全库仅 `mg_mqtt_ping()` 一处,须应用自己定时调用),③ 网关从未调用 → broker 按 MQTT 3.1.1 规范在 **1.5×60=90s** 无消息强制断开 → 5s 重连定时器接回
+- 为什么平时没暴露:单片机持续上报时每条 report 都重置 broker 的 90s 计时器;**只有空闲期**触发
+- 真实影响:断线 ~5s 窗口内 `/api/control` 命令被 `publish()` 丢弃(`conn==nullptr` 防御检查,不崩溃但丢命令)
+- 为什么不会崩:MQTT 星型架构——上报方向(单片机→broker→网关)在网关掉线时消息在 broker 处丢失(`clean=true` 不缓存),网关无代码执行;下行方向 `publish()` 有 `conn==nullptr||!subscribed_` 防御检查
+- **修复**:新增常驻心跳定时器 `ping_timer_`(30s REPEAT = keepalive/2),`conn != nullptr` 时调 `mg_mqtt_ping()`
+- 验证:Python 假 broker 端到端测试(真实 MQTT 协议)→ 连接后 **30.0s 整收到 PINGREQ**,PASS;`cmake --build build` 通过
+
+**clangd 假错修复(工具链)**
+- 根因(实测逐场景验证,非推测):① 系统 clangd 10.0.0 **完全不读 `.clangd` 配置文件**(写 `Suppress:'*'` 都无效);② clangd 自动发现编译数据库时**只在源文件父目录链找 `compile_commands.json`,不进 `build/` 子目录** → 永远找不到 → 无 include 路径 → 连环假错;③ 新文件(未编译)无编译参数 → 同样假错
+- 修复:`CMakeLists.txt` 加 `copy_compile_commands` 目标(构建时复制 `build/compile_commands.json` 到项目根目录;**仅宿主构建**,`CMAKE_CROSSCOMPILING` 时跳过)+ 显式 `CMAKE_CXX_STANDARD 14`(编译命令带 `-std=gnu++14`);`.gitignore` 加 `/compile_commands.json`;`.clangd` 升级新格式(加 `CompileFlags.Add` 兜底标志,clangd 12+ 生效)
+- 结果:LSP 诊断 **68 条假错 → 0**;clangd 10 零配置裸启动全部文件 0 诊断;新文件场景 0 诊断
+- 可选升级:`sudo apt install clangd-12` + `update-alternatives`(升级后 `.clangd` 配置才生效,不升级也不影响,根目录 DB 方案对老版本同样有效)
+
+**git 状态提醒**:本轮改动(src 修复 + CMakeLists + .gitignore)均未提交;`build-arm.sh` 有一处用户自己的未提交改动(部署时同步 `config/devices/` + 验证 `/api/devices`),提交前注意区分。
 
 ### 📡 通信协议定稿(2026-08-11 盘点,唯一权威)
 
@@ -304,6 +470,32 @@ curl:`curl http://192.168.5.70:8081/api/status`;Qt:`mgr->get(QNetworkRequest(QUr
 | Server → Client | `mqtt_pub_ack` | 发布确认:`{"type":"mqtt_pub_ack","ok":true}` |
 | Server → Client | `error` | 错误信息:`{"type":"error","error":"missing_topic"}` |
 
+### 🎓 老师规范研读:哪些配置需要动态修改(2026-08-12)
+
+> 来源:老师 `project-plan.md`(1105 行)逐条核对。老师设计哲学 = **"配置"改文件重启,"操作"走 API 运行中执行**。除规则引擎外,没有其他必须动态改的配置。
+
+**✅ 必须动态(老师做了专门 API)**:
+
+| 配置 | API | 说明 |
+|---|---|---|
+| 规则引擎 | `GET /api/rules`、`POST /api/rules/reload`、`POST /api/rules/:id/enable`、`POST /api/rules/:id/disable` | **唯一**老师明确做成运行时可改的配置(占 20% 分) |
+
+**✅ 运行中操作(不是配置修改,是 API 调用)**:
+
+| 项 | API | 说明 |
+|---|---|---|
+| 执行器 | `POST /api/actuators/:id/set` | 运行中下发命令 |
+| 摄像头 | `POST /api/camera/*`(start/stop/snapshot/record) | 运行中启停 |
+
+**❌ 重启生效(老师明确要"改文件重启",不用动态)**:
+
+- 阶段一验收标准原话:"修改配置文件后重启,网关能正确读取新配置"
+- 日志 level:`--log-level` 启动参数(老师方案,非动态)
+- 网络端口 / MQTT 地址 / 设备注册:启动时读 yaml
+- `set_level()` 已有但未暴露 HTTP 接口——**这是加分优化,非老师要求,别过度设计**
+
+**结论**:阶段 4 做规则引擎 4 个 API 即可满足老师"动态"要求;不要给日志/配置乱加动态接口(偏离老师验收)。
+
 ### 🏗️ 技术底座:单线程事件循环下的性能与线程安全约定(2026-08-11 定)
 
 > 来源:与用户讨论"payload 是啥 / 上报后处理链 / 轮询线程安全 / 高密度请求 / 视频功能"后的架构决策。阶段 2/3/4 的代码都按此约定写。
@@ -395,6 +587,27 @@ std::string env = control.build_control_envelope(body, ctx->config.device_id);
 - `fn_data` 跟着连接走,语义清晰(请求上下文),mongoose 官方标准模式
 - 项目内已有两处范例:HTTP `request_handler` 用 `HttpContext`、MQTT `event_handler` 用 `c->fn_data` 拿 `this`
 
+### 🔄 状态同步方案:Web 控制 → Qt/Web 端刷新(2026-08-12 定,协作约定)
+
+> 场景:Web 端控制外设 → 单片机执行 → 状态变化 → Qt 端如何同步?
+> 权威来源:**单片机 status 回执**(不是网关猜的)。链路:Web --POST /api/control--> 网关 --MQTT--> 单片机执行 --> status回执 --> 网关缓存 --> 前端刷新
+
+**当前方案:HTTP 轮询(先行,推荐)**:
+- Qt/Web 端每 1 秒 `GET /api/status` → 拿到最新缓存 → 刷新界面(QTimer + QNetworkAccessManager)
+- ✅ 网关零新代码(/api/status 已返回最新缓存);✅ 简单可靠,1 秒延迟对演示足够
+- ❌ 非实时;轮询频率别太高(1s 合理,500ms 起就有点浪费)
+
+**后续升级:WebSocket 推送(阶段七做)**:
+- 网关加 `ws://192.168.5.70:8081/ws`,收到 MQTT 消息 → 更新缓存 → **主动推送**给所有 ws 客户端
+- 推送消息格式(协议定稿):`{"type":"mqtt_msg","topic":"...","payload":"..."}`
+- Qt 用 `QWebSocket` 接收;界面逻辑不变,只换数据来源(轮询→推送)
+- **分工约定**:Web/Qt 同事先按轮询写,网关 ws 做好后再切换,两者读的都是 /api/status 同源数据
+
+**⚠️ 前提铁律:status 回执必须解析**:
+- /api/status 的执行器字段(led_on/motor_on/buzzer 等)来自单片机 status 回执(items 数组)
+- **status 回执解析是同步链的命门**——不解析则执行器状态永远是 0,前端轮询/推送都拿不到真状态
+- 当前状态:device.cpp 的 status 分支还是空的,🔴 **必须实现 items 数组遍历**(2026-08-12 待办)
+
 ## 6. 已知的坑(别重复踩)
 
 1. **buildroot 改配置后必须 `make savedefconfig`**,否则不生效;输出在独立目录 `output/rockchip_rk3568`
@@ -412,6 +625,12 @@ std::string env = control.build_control_envelope(body, ctx->config.device_id);
 13. **yaml-cpp 0.5.2 的共享库开关是 `BUILD_SHARED_LIBS`**(不是 `YAML_BUILD_SHARED_LIBS`,后者被静默忽略);CMakeLists 里 `find_package(Boost REQUIRED)` 需注释掉
 14. **GitHub release tag 名**:yaml-cpp 是 `release-0.5.2`;boost 源码不在 github releases(404),用 `archives.boost.io` 下载
 15. **板上有 libyaml-cpp.so.0.5.2**(buildroot 已装),网关交叉编译只需链接 sysroot 版本,运行时用板上库,无需往板上拷 .so
+16. **mongoose 回调传数据用 `fn_data`,别用全局变量**:`mg_http_listen(mgr, url, fn, &ctx)` 第 4 参传入,accept 新连接自动继承(`c->fn_data = lsn->fn_data`,mongoose.c:5290),回调里 `connect->fn_data` 取回。传的指针必须存活 ≥ mgr 事件循环
+17. **`/api/control` 请求体键名 = `payload`**(前端 index.html 定稿 + 老师 plan.md 原文;曾临时改 body 已改回 2026-08-12);`control.cpp` 用常量 `kControlPayloadPath = "$.payload"`,将来要改只动一处。**前端控制请求已实测 200**
+18. **`MG_EV_MQTT_OPEN` 的 `ev_data` 实际是 `uint8_t*`(CONNACK ack 码)**:mongoose.h 注释写 `int *connack_status_code` 是错的,以实现为准;`*(uint8_t*)ev_data == 0` 才成功
+19. **mongoose 不自动发 MQTT 心跳(PINGREQ)**:`mg_mqtt_ping()` 须应用自己定时调用。网关已加 30s 心跳定时器(2026-08-13);否则 broker 在 1.5×keepalive(90s)无消息强制断开,空闲期每 ~95s 断连重连循环
+20. **clangd 只在源文件父目录链找 `compile_commands.json`,不进 `build/` 子目录**。项目已用 CMake `copy_compile_commands` 目标把数据库复制到根目录(宿主构建时自动,已 gitignore);新装机器上先跑一次 `cmake --build build` 根目录才会出现
+21. **系统 clangd 10(ubuntu20.04)完全不读 `.clangd` 配置文件**;`.clangd` 项目配置需 clangd 12+。老版本靠根目录 compile_commands.json 自动发现,新版本靠 `.clangd` 兜底标志,两种都可用
 
 ## 7. 从零开始:小白也能交叉编译(5 分钟)
 

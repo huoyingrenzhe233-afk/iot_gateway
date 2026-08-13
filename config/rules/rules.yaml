@@ -1,0 +1,48 @@
+# 规则引擎演示规则(2026-08-13)
+# ⚠️ 一致性铁律:sensor/actuator 的 id 必须与 config/devices/*.yaml 的 id 一字不差
+# 边沿触发:条件从不满足变满足的瞬间触发一次动作(恢复规则负责回退)
+rules:
+  - id: temp_alarm
+    name: 高温报警
+    enabled: true
+    when:
+      sensor: temp_1
+      op: ">"
+      value: 30
+    then:
+      actuator: buzzer_1
+      field: buzzer
+      value: 1
+  - id: temp_alarm_off
+    name: 高温解除
+    enabled: true
+    when:
+      sensor: temp_1
+      op: "<="
+      value: 30
+    then:
+      actuator: buzzer_1
+      field: buzzer
+      value: 0
+  - id: dark_led_on
+    name: 暗光开灯
+    enabled: true
+    when:
+      sensor: light_1
+      op: "<"
+      value: 100
+    then:
+      actuator: led_1
+      field: led_on
+      value: 1
+  - id: bright_led_off
+    name: 亮光关灯
+    enabled: true
+    when:
+      sensor: light_1
+      op: ">="
+      value: 100
+    then:
+      actuator: led_1
+      field: led_on
+      value: 0
