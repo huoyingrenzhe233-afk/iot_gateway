@@ -53,4 +53,32 @@ namespace gateway
     LOG_INFO("control envelope: %s", envelope.c_str());
     return envelope;
   }
+
+  // ------------------------------------------------------------
+  // build_field_envelope:组"单字段"命令信封(协议格式的单一来源)
+  // 供 /api/actuators/:id/set 和规则引擎复用,保证命令信封格式三处一致:
+  //   {"type":"cmd","dev":"mcu01","ts":"2026-08-13 10:00:00","body":{"led_on":1}}
+  // ------------------------------------------------------------
+  std::string Control::build_field_envelope(const std::string &device_id,
+                                            const std::string &field, long value)
+  {
+    char ts[32];
+    std::time_t now = std::time(nullptr);
+    struct tm tm = {};
+    localtime_r(&now, &tm);
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm);
+
+    std::string envelope;
+    envelope.reserve(96);
+    envelope += "{\"type\":\"cmd\",\"dev\":\"";
+    envelope += device_id;
+    envelope += "\",\"ts\":\"";
+    envelope += ts;
+    envelope += "\",\"body\":{\"";
+    envelope += field;
+    envelope += "\":";
+    envelope += std::to_string(value);
+    envelope += "}}";
+    return envelope;
+  }
 } // namespace gateway

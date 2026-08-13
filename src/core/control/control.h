@@ -17,5 +17,11 @@ namespace gateway
     // 失败返回空字符串
     std::string build_control_envelope(const std::string &body,
                                        const std::string &device_id);
+
+    // 组单字段命令信封:{"type":"cmd","dev":"...","ts":"...","body":{field:value}}
+    // 供 /api/actuators/:id/set 和规则引擎复用(与 build_control_envelope 区别:
+    // 那个从 HTTP body 抠 payload,这个直接指定 field=value)
+    static std::string build_field_envelope(const std::string &device_id,
+                                            const std::string &field, long value);
   };
 } // namespace gateway

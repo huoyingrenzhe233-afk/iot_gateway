@@ -119,6 +119,53 @@ namespace gateway
     }
 
     // ------------------------------------------------------------
+    // find:按 id 查找登记条目,找不到返回 nullptr
+    // (登记表条目少,线性扫描即可;返回指针指向 entries_ 内部元素,生命周期随本对象)
+    // ------------------------------------------------------------
+    const DeviceEntry *DeviceRegistry::find(const std::string &id) const
+    {
+        for (const DeviceEntry &e : entries_)
+        {
+            if (e.id == id)
+            {
+                return &e;
+            }
+        }
+        return nullptr;
+    }
+
+    // ------------------------------------------------------------
+    // to_json_detail:生成单条设备详情 JSON(老师验收 3.2.5#2)
+    // last_seen 非空 = 收到过 MQTT 上报(在线),空 = 从未上报(离线)
+    // 单台 mcu01 场景:所有外设共用同一个 last_seen(Device 缓存只有一份)
+    // 找不到 id 返回空字符串(调用方据此回 404)
+    // ------------------------------------------------------------
+    std::string DeviceRegistry::to_json_detail(const std::string &id,
+                                               const std::string &last_seen) const
+    {
+        const DeviceEntry *e = find(id);
+        if (e == nullptr)
+        {
+            return "";
+        }
+        std::string out;
+        out += "{\"id\":\"";
+        out += json_escape(e->id);
+        out += "\",\"kind\":\"";
+        out += json_escape(e->kind);
+        out += "\",\"protocol\":\"";
+        out += json_escape(e->protocol);
+        out += "\",\"description\":\"";
+        out += json_escape(e->description);
+        out += "\",\"online\":";
+        out += last_seen.empty() ? "false" : "true";
+        out += ",\"last_seen\":\"";
+        out += json_escape(last_seen);
+        out += "\"}";
+        return out;
+    }
+
+    // ------------------------------------------------------------
     // to_json_list:生成 /api/devices 的 JSON 数组(手拼,不引第三方库)
     // 所有字符串字段过 json_escape,防特殊字符破坏 JSON
     // ------------------------------------------------------------

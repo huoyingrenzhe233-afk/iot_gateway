@@ -46,6 +46,14 @@ namespace gateway
         // 判断某 id 是否已登记;kind 传 "sensor"/"actuator" 精确匹配,空串=任意类型
         bool contains(const std::string &id, const std::string &kind) const;
 
+        // 按 id 查找登记条目;找不到返回 nullptr(供 /api/devices/:id 判断存在性)
+        const DeviceEntry *find(const std::string &id) const;
+
+        // 生成单条设备详情 JSON(找不到返回空字符串);last_seen 非空 → online=true
+        // 返回:{"id":"temp_1","kind":"sensor","protocol":"mqtt","description":"...","online":true,"last_seen":"..."}
+        std::string to_json_detail(const std::string &id,
+                                   const std::string &last_seen) const;
+
     private:
         std::vector<DeviceEntry> entries_; // 全部登记(传感器+执行器)
     };
