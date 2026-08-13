@@ -13,6 +13,7 @@
 #include <cerrno>     // EAGAIN/EWOULDBLOCK
 #include <cstring>    // strerror
 #include <fcntl.h>    // open/O_RDWR/O_NOCTTY/O_NONBLOCK
+#include <poll.h>     // poll(POLLOUT 写缓冲等待,防 EAGAIN 死循环)
 #include <termios.h>  // termios/cfmakeraw/cfsetispeed/cfsetospeed
 #include <unistd.h>   // read/write/close
 
@@ -105,18 +106,30 @@ bool ZigbeeAdapter::send(const std::string &msg) {
   }
   std::string frame = msg + "\n"; // 自动补换行分帧
   size_t off = 0;                 // 已写入的偏移
+  int eagain = 0;                 // EAGAIN 连续重试计数(防死循环)
   // write 对串口可能部分写入(缓冲满等),循环写直到全部发出或出错
   while (off < frame.size()) {
     ssize_t n = write(fd_, frame.data() + off, frame.size() - off);
     if (n < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        continue; // 非阻塞缓冲满:重试(单线程,不会死等,但极端情况会空转)
+        // 缓冲满:等最多 50ms 可写再试;超过 100 次(约 5s)放弃,防死循环卡死事件循环
+        if (++eagain > 100) {
+          LOG_ERROR("zigbee: send failed (tx buffer full, giving up)");
+          return false;
+        }
+        struct pollfd pfd;
+        pfd.fd = fd_;
+        pfd.events = POLLOUT;
+        pfd.revents = 0;
+        poll(&pfd, 1, 50); // 50ms 超时
+        continue;          // 重新 write(可写或超时都会再试,受 eagain 上限保护)
       }
       LOG_ERROR("zigbee: write failed: %s", strerror(errno));
       return false;
     }
     if (n == 0) break; // 写 0 字节:异常,放弃剩余
     off += static_cast<size_t>(n);
+    eagain = 0; // 有进展,重置重试计数
   }
   return off == frame.size(); // 全部写完才算成功
 }
