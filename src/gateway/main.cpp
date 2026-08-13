@@ -1,11 +1,12 @@
 // ============================================================
 // 网关主程序入口(阶段 1-8 全部集成)
 // 职责:启动 HTTP 服务(mongoose)+ MQTT 客户端,路由 /api/* 请求,
-//       集成设备状态/注册表/规则引擎/摄像头管理
-// 数据流:Web/Qt --HTTP--> 网关 --MQTT--> 单片机
-//       单片机 --MQTT--> 网关 --内存缓存--> Web/Qt(WS 推送待做)
+//       集成设备状态/注册表/规则引擎/摄像头管理/WebSocket 推送
+// 数据流:Web/Qt --HTTP/WS--> 网关 --MQTT--> 单片机
+//       单片机 --MQTT--> 网关 --内存缓存--> Web/Qt(HTTP 轮询 + WS 广播)
 // ============================================================
 #include "core/common/config/config.h"   // 配置加载(读 config/gateway.yaml)
+#include "core/common/json_util.h"      // json_escape(WebSocket 广播用)
 #include "core/common/logger/logger.h"   // 日志
 #include "core/common/mqtt/mqtt_client.h" // MQTT 客户端
 #include "core/control/control.h"        // 控制信封组包
@@ -15,6 +16,7 @@
 #include "core/rules/rule_engine.h"      // 规则引擎(阶段七:/api/rules 系列 + 上报触发评估)
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 #include <sys/wait.h> // waitpid:僵尸进程收割(reap_children)
 #include <mongoose.h>
 static const char *VERSION = "1.0.0"; // /api/version 返回的版本号
@@ -123,6 +125,70 @@ static void reap_children(void *arg)
 }
 
 // ------------------------------------------------------------
+// WebSocket 客户端列表:升级成功的连接都登记在这里,广播时逐个发
+// (单线程事件循环,无并发访问,无需加锁)
+// ------------------------------------------------------------
+static std::vector<struct mg_connection *> g_ws_clients;
+
+// ------------------------------------------------------------
+// ws_send_text:向单个 WebSocket 连接发一条文本消息
+// ------------------------------------------------------------
+static void ws_send_text(struct mg_connection *c, const std::string &s)
+{
+  mg_ws_send(c, s.data(), s.size(), WEBSOCKET_OP_TEXT);
+}
+
+// ------------------------------------------------------------
+// ws_broadcast:向所有已连接的 WebSocket 客户端广播一条文本消息
+// (阶段三核心:MQTT 消息 → 实时推送到所有前端日志窗口)
+// ------------------------------------------------------------
+static void ws_broadcast(const std::string &text)
+{
+  // 用 auto 而非 "struct mg_connection *":老 gcc(6.3 linaro)会把 range-for
+  // 里的 elaborated-type-specifier 误报为"types may not be defined"
+  for (auto *c : g_ws_clients)
+  {
+    ws_send_text(c, text);
+  }
+}
+
+// ------------------------------------------------------------
+// handle_ws_message:处理客户端发来的 WebSocket 消息(模拟 MQTT 发布)
+// 客户端格式:{"topic":"...","payload":"..."} → 网关发布到 MQTT
+// 服务端回:{type:"mqtt_pub_ack"} / {type:"error"}(老师 3.3.4 定稿)
+// ------------------------------------------------------------
+static void handle_ws_message(struct mg_connection *c, HttpContext *ctx,
+                              struct mg_ws_message *wm)
+{
+  struct mg_str json = mg_str_n(wm->data.buf, wm->data.len);
+  // 取 topic / payload 字符串(都要 free;get_str 返回 malloc 内存)
+  char *topic = mg_json_get_str(json, "$.topic");
+  char *payload = mg_json_get_str(json, "$.payload");
+
+  if (topic == nullptr)
+  {
+    free(payload); // payload 可能非空,同样要释放
+    ws_send_text(c, "{\"type\":\"error\",\"error\":\"missing_topic\"}");
+    return;
+  }
+  std::string topic_str(topic);
+  free(topic);
+  std::string payload_str = payload ? payload : "";
+  free(payload);
+
+  if (ctx->mqtt == nullptr || !ctx->mqtt->is_connected())
+  {
+    ws_send_text(c, "{\"type\":\"error\",\"error\":\"mqtt_not_connected\"}");
+    return;
+  }
+
+  // 发布到 MQTT + 回确认(老师 3.3.4:WebSocket 消息处理链路)
+  ctx->mqtt->publish(topic_str, payload_str);
+  ws_send_text(c, "{\"type\":\"mqtt_pub_ack\",\"ok\":true}");
+  LOG_INFO("ws publish: %s", topic_str.c_str());
+}
+
+// ------------------------------------------------------------
 // HTTP 请求处理器:mongoose 每个 HTTP 请求都会回调这里
 // connect   = 当前请求的连接(可回写响应)
 // event     = 事件类型(我们只关心 MG_EV_HTTP_MSG = 收到完整 HTTP 请求)
@@ -131,7 +197,43 @@ static void reap_children(void *arg)
 static void request_handler(struct mg_connection *connect, int event,
                             void *event_data)
 {
-  if (event == MG_EV_HTTP_MSG)
+  // ---- WebSocket 事件(升级后的连接走这里,不走下面的 HTTP 路由) ----
+  // 注意:ctx(fn_data)在 WS 连接上同样可用(从监听器继承,mg_ws_upgrade 不清 fn_data)
+  HttpContext *ws_ctx = static_cast<HttpContext *>(connect->fn_data);
+
+  if (event == MG_EV_WS_OPEN)
+  {
+    // 握手完成,登记为 WebSocket 客户端(老师验收:连接后 MQTT 消息实时推送)
+    g_ws_clients.push_back(connect);
+    LOG_INFO("ws client connected (total %zu)", g_ws_clients.size());
+    return;
+  }
+  if (event == MG_EV_WS_MSG)
+  {
+    struct mg_ws_message *wm = (struct mg_ws_message *)event_data;
+    handle_ws_message(connect, ws_ctx, wm);
+    return;
+  }
+  if (event == MG_EV_CLOSE)
+  {
+    // 连接关闭:从广播列表移除(HTTP 短连接也会走这里,不在列表里就跳过)
+    for (size_t i = 0; i < g_ws_clients.size(); i++)
+    {
+      if (g_ws_clients[i] == connect)
+      {
+        g_ws_clients.erase(g_ws_clients.begin() + i);
+        break;
+      }
+    }
+    LOG_INFO("ws client disconnected (total %zu)", g_ws_clients.size());
+    return;
+  }
+
+  if (event != MG_EV_HTTP_MSG)
+  {
+    return; // 其他事件(ACCEPT/READ/WRITE/WS_CTL 等)忽略
+  }
+
   {
     struct mg_http_message *hm = (struct mg_http_message *)event_data;
     // 从 mongoose 连接取出上下文(fn_data 方式,替代全局变量)
@@ -495,6 +597,13 @@ static void request_handler(struct mg_connection *connect, int event,
       mg_http_serve_file(connect, hm, "web/index.html", &opts);
     }
 
+    // GET /ws → WebSocket 升级(阶段三:MQTT 消息实时推送到前端日志)
+    // 升级后连接仍走本回调(request_handler),事件变为 MG_EV_WS_* / CLOSE
+    else if (mg_match(hm->uri, mg_str("/ws"), NULL))
+    {
+      mg_ws_upgrade(connect, hm, NULL);
+    }
+
     // 其他一切路径 → 404
     else
     {
@@ -565,6 +674,16 @@ int main(int argc, char *argv[])
     LOG_INFO("on_message: %s -> %s", topic.c_str(), payload.c_str());
     g_device.update_from_report(payload);
     g_rules.evaluate(payload); // 触发规则引擎评估(仅 sensor 信封生效)
+
+    // 阶段三:广播给所有 WebSocket 客户端(前端日志实时显示 MQTT 消息)
+    // 格式(老师 3.3.4):{"type":"mqtt_msg","topic":"...","payload":"..."}
+    // payload 是 JSON 字符串,嵌入外层 JSON 前要 json_escape
+    std::string msg = "{\"type\":\"mqtt_msg\",\"topic\":\"";
+    msg += gateway::json_escape(topic);
+    msg += "\",\"payload\":\"";
+    msg += gateway::json_escape(payload);
+    msg += "\"}";
+    ws_broadcast(msg);
   };
   // 7.5 规则动作回调:规则触发 → 发布命令到单片机 + 同步状态缓存
   //     和 /api/control 同款逻辑(发布 + update_from_control 两步)
