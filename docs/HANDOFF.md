@@ -70,8 +70,11 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 - `src/core/camera/`:`CameraManager`(mjpg-streamer 推流 / wget 抓拍 / ffmpeg -c copy 录像,零转码)+ 5 个 `/api/camera/*` 路由 + 前端页面伺服
 - 前端 `web/index.html`(方案 C:全链路 MJPEG);详见 5.8 节
 
+### ✅ 阶段 9(WebSocket 实时推送)— 完成(2026-08-13,本机验证)
+- `/ws` 升级 + MQTT 消息广播;前端 WS 客户端实时显示;详见 5.10 节
+
 ### ⏳ 未开始
-- WebSocket /ws、feature/device 开 PR 合 main
+- feature/device 开 PR 合 main
 
 ## 3. 环境信息
 
@@ -318,6 +321,26 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 
 **验证**:host 端到端测通(本机 mosquitto 在跑)——actuator set 发布 cmd `{"body":{"buzzer":1}}`/`{"body":{"led_on":0}}`、/api/status 缓存同步、规则引擎回归无异常(Control 重构不影响规则触发)。503 分支代码审查确认(板上停 mosquitto 可实测)。
 
+### ✅ 5.10 WebSocket `/ws` — **已完成(2026-08-13,阶段三验收 3.3.7#7)**
+
+> MQTT 消息实时推送:单片机上报 → 网关广播给所有 WS 客户端 → 前端日志实时显示。
+
+**消息格式(老师 3.3.4 定稿)**:
+| 方向 | 类型 | 格式 |
+|---|---|---|
+| Client→Server | (无 type) | `{"topic":"...","payload":"..."}`(模拟 MQTT 发布) |
+| Server→Client | `mqtt_msg` | `{"type":"mqtt_msg","topic":"...","payload":"..."}`(广播) |
+| Server→Client | `mqtt_pub_ack` | `{"type":"mqtt_pub_ack","ok":true}` |
+| Server→Client | `error` | `{"type":"error","error":"missing_topic"/"mqtt_not_connected"}` |
+
+**实现**:
+- 网关:main.cpp 里 `g_ws_clients` 向量登记 WS 连接;`MG_EV_WS_OPEN` 登记、`MG_EV_WS_MSG` 解析发布、`MG_EV_CLOSE` 移除;`GET /ws` 升级路由;on_message 里 `ws_broadcast` 推 `mqtt_msg`
+- **mongoose 细节**(踩坑确认):`mg_ws_upgrade` 会把连接 `pfn` 换成内部 `mg_ws_cb`,但**用户回调 `fn`(request_handler)和 `fn_data`(ctx)保留**——所以升级后事件仍走 request_handler,ctx 照常可用
+- 前端:web/index.html 加 WS 客户端(`connectWs`),收到 `mqtt_msg` 写进日志窗口,断线 3s 自动重连
+- 顺带重构:json_escape 抽到 `src/core/common/json_util.h`(header-only),device_registry/rule_engine/main.cpp 三处共用(消除三份拷贝)
+
+**验证**:Python 原始 socket 实现 WS 客户端测通——握手 101、发 `{"topic","payload"}` 回 `mqtt_pub_ack`、缺 topic 回 `missing_topic`、外部 mosquitto_pub 上报后收到 `mqtt_msg` 广播,三链全通。
+
 ### ⏳ 5.6 待办清单(按优先级)
 
 | 优先级 | 事项 | 说明 |
@@ -330,7 +353,7 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 | 🟡 中 | 板上验证摄像头 | **已完成(2026-08-13)**:插摄像头后真机测通推流/抓拍/录像(见 5.8 验证证据) |
 | ✅ 中 | `/api/devices/:id` 单设备详情 | **已完成(2026-08-13)**,详见 5.9 |
 | ✅ 中 | `POST /api/actuators/:id/set` 单执行器 | **已完成(2026-08-13)**,详见 5.9(老师验收 3.2.5#5) |
-| 🟡 中 | WebSocket /ws | 实时推送(替代轮询);消息格式见协议定稿 |
+| ✅ 中 | WebSocket /ws | **已完成(2026-08-13)**,详见 5.10(阶段三验收 3.3.7#7) |
 | 🟢 低 | feature/device 开 PR 合 main | 阶段四落袋 |
 
 > P0(2026-08-13)已完成:6 个提交已 push;板上部署验证通过(含 MQTT 心跳修复)。P1(规则引擎)、P2(摄像头)均已完成本机/板上验证,见 5.7/5.8。
@@ -723,6 +746,7 @@ std::string env = control.build_control_envelope(body, ctx->config.device_id);
 19. **mongoose 不自动发 MQTT 心跳(PINGREQ)**:`mg_mqtt_ping()` 须应用自己定时调用。网关已加 30s 心跳定时器(2026-08-13);否则 broker 在 1.5×keepalive(90s)无消息强制断开,空闲期每 ~95s 断连重连循环
 20. **clangd 只在源文件父目录链找 `compile_commands.json`,不进 `build/` 子目录**。项目已用 CMake `copy_compile_commands` 目标把数据库复制到根目录(宿主构建时自动,已 gitignore);新装机器上先跑一次 `cmake --build build` 根目录才会出现
 21. **系统 clangd 10(ubuntu20.04)完全不读 `.clangd` 配置文件**;`.clangd` 项目配置需 clangd 12+。老版本靠根目录 compile_commands.json 自动发现,新版本靠 `.clangd` 兜底标志,两种都可用
+22. **ARM 交叉编译器(gcc 6.3 linaro)比 host gcc 9.4 严格**:range-for 里的 elaborated-type-specifier(`for (struct mg_connection *c : ...)`)会报 `warning: types may not be defined in a for-range-declaration`,host gcc 9.4 不报。**验证告警必须跑 ARM 交叉编译,不能只看 host 构建**;修复:range-for 里用 `auto *c` 而非 `struct X *c`
 
 ## 7. 从零开始:小白也能交叉编译(5 分钟)
 
