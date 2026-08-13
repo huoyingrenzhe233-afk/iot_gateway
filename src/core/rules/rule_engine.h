@@ -24,7 +24,7 @@ namespace gateway {
         bool enabled = true;     // 启停状态(运行时可变,reload 时保留)
         // when:传感器条件(单条件)
         std::string sensor_id;   // 传感器注册表 id(如 temp_1)
-        std::string op;          // 比较符 ">"/"<"/">="/"<="/"=="
+        std::string op;          // 比较符 ">"/"<"/">="/"<="(不含 ==,浮点精确相等无意义)
         double threshold = 0;    // 阈值
         // then:动作
         std::string actuator_id; // 执行器注册表 id(如 buzzer_1)

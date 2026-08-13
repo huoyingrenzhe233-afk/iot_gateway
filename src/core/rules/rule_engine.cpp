@@ -73,7 +73,7 @@ namespace gateway {
     // 校验规则(防"规则永不触发"的哑弹):
     //   1. id:非空 + 不重复(API 引用主键,重复会导致 set_enabled 歧义)
     //   2. sensor_id:必须在本文件传感器映射表里 + 注册表登记过
-    //   3. op:必须是 ">"/"<"/">="/"<="/"==" 之一
+    //   3. op:必须是 ">"/"<"/">="/"<=" 之一(不含 ==,浮点精确相等无意义)
     //   4. actuator_id:必须在本文件执行器白名单里 + 注册表登记过
     //   5. field:必须在对应执行器的白名单里
     // ------------------------------------------------------------
@@ -135,9 +135,10 @@ namespace gateway {
                              r.id.c_str(), r.sensor_id.c_str());
                     continue;
                 }
-                // ④ op:白名单比较符
+                // ④ op:白名单比较符(不含 ==:浮点精确相等在传感器场景无意义,
+                //    测量值几乎不会精确等于人为阈值,只支持大小比较)
                 if (r.op != ">" && r.op != "<" && r.op != ">=" &&
-                    r.op != "<=" && r.op != "==")
+                    r.op != "<=")
                 {
                     LOG_WARN("rules: rule '%s' invalid op '%s', skipped",
                              r.id.c_str(), r.op.c_str());
@@ -314,7 +315,6 @@ namespace gateway {
         if (op == "<")  return actual < threshold;
         if (op == ">=") return actual >= threshold;
         if (op == "<=") return actual <= threshold;
-        if (op == "==") return actual == threshold;
         LOG_WARN("rules: unknown op '%s'", op.c_str());
         return false;
     }
