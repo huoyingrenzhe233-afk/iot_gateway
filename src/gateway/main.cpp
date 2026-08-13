@@ -63,6 +63,52 @@ static bool extract_rule_id(const struct mg_http_message *hm,
 }
 
 // ------------------------------------------------------------
+// extract_device_id:从 /api/devices/<id> URI 里抠出 <id>
+//   例:GET /api/devices/temp_1 → out="temp_1"
+// ------------------------------------------------------------
+static bool extract_device_id(const struct mg_http_message *hm, std::string &out)
+{
+  std::string uri(hm->uri.buf, hm->uri.len);
+  const std::string prefix = "/api/devices/";
+  if (uri.size() <= prefix.size()) return false;
+  if (uri.compare(0, prefix.size(), prefix) != 0) return false;
+  out = uri.substr(prefix.size());
+  return !out.empty();
+}
+
+// ------------------------------------------------------------
+// extract_actuator_id:从 /api/actuators/<id>/set URI 里抠出 <id>
+//   例:POST /api/actuators/led_1/set → out="led_1"
+// ------------------------------------------------------------
+static bool extract_actuator_id(const struct mg_http_message *hm, std::string &out)
+{
+  std::string uri(hm->uri.buf, hm->uri.len);
+  const std::string prefix = "/api/actuators/";
+  const std::string suffix = "/set";
+  if (uri.size() <= prefix.size() + suffix.size()) return false;
+  if (uri.compare(0, prefix.size(), prefix) != 0) return false;
+  if (uri.compare(uri.size() - suffix.size(), suffix.size(), suffix) != 0)
+    return false;
+  out = uri.substr(prefix.size(), uri.size() - prefix.size() - suffix.size());
+  return !out.empty();
+}
+
+// ------------------------------------------------------------
+// actuator_primary_field:执行器 id → 主命令字段映射
+//   led_1 → led_on、motor_1 → motor_on、buzzer_1 → buzzer
+// 与 rule_engine.cpp 的 actuator_fields() 白名单一致;未知 id 返回 nullptr。
+// (为什么只映射"主"字段:老师验收示例 POST /api/actuators/led/set {"value":1}
+//  语义是"开/关该执行器",取每个执行器最直观的开关字段)
+// ------------------------------------------------------------
+static const char *actuator_primary_field(const std::string &id)
+{
+  if (id == "led_1")    return "led_on";
+  if (id == "motor_1")  return "motor_on";
+  if (id == "buzzer_1") return "buzzer";
+  return nullptr;
+}
+
+// ------------------------------------------------------------
 // 僵尸进程收割:每 5s 回收已退出的子进程(mjpg_streamer/ffmpeg/wget)
 // fork 出的子进程退出后若没人 waitpid 会留僵尸占进程表;
 // 事件循环单线程,这里用 waitpid(-1, WNOHANG) 非阻塞轮询一把收干净
@@ -95,6 +141,9 @@ static void request_handler(struct mg_connection *connect, int event,
 
     // enable/disable 路由共用:从 /api/rules/<id>/<suffix> 抠出的规则 id
     std::string rule_id;
+    // devices/actuators 路由共用:从 URI 抠出的设备/执行器 id
+    std::string device_id_str;
+    std::string actuator_id_str;
 
     // ---- 路由表:按 URI + method 匹配(防 POST/DELETE 误触发 GET 端点) ----
 
@@ -128,6 +177,68 @@ static void request_handler(struct mg_connection *connect, int event,
       {
         mg_http_reply(connect, 500, "Content-Type: application/json\r\n",
                       "{\"error\":\"registry_not_ready\"}");
+      }
+    }
+
+    // GET /api/devices/<id> → 单设备详情(老师验收 3.2.5#2:返回单个设备详情)
+    // online/last_seen 来自 Device 缓存(收到过上报 = 在线)
+    else if (mg_match(hm->method, mg_str("GET"), NULL) &&
+             extract_device_id(hm, device_id_str))
+    {
+      std::string last_seen =
+          (ctx->device != nullptr) ? ctx->device->last_seen() : "";
+      std::string detail =
+          (ctx->registry != nullptr)
+              ? ctx->registry->to_json_detail(device_id_str, last_seen)
+              : "";
+      if (detail.empty())
+      {
+        mg_http_reply(connect, 404, "Content-Type: application/json\r\n",
+                      "{\"error\":\"device_not_found\"}");
+      }
+      else
+      {
+        mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
+                      "%s", detail.c_str());
+      }
+    }
+
+    // POST /api/actuators/<id>/set → 单执行器下发(老师验收 3.2.5#5)
+    // body {"value":1};id → 主命令字段 → 组信封 → 发布 + 缓存同步
+    // 状态码:200 成功 / 404 未知执行器 / 400 缺 value / 503 MQTT 未连接
+    else if (mg_match(hm->method, mg_str("POST"), NULL) &&
+             extract_actuator_id(hm, actuator_id_str))
+    {
+      const char *field = actuator_primary_field(actuator_id_str);
+      if (field == nullptr)
+      {
+        mg_http_reply(connect, 404, "Content-Type: application/json\r\n",
+                      "{\"error\":\"actuator_not_found\"}");
+      }
+      else if (mg_json_get_tok(mg_str_n(hm->body.buf, hm->body.len), "$.value")
+                   .len == 0)
+      {
+        mg_http_reply(connect, 400, "Content-Type: application/json\r\n",
+                      "{\"error\":\"missing value\"}");
+      }
+      else if (ctx->mqtt == nullptr || !ctx->mqtt->is_connected())
+      {
+        mg_http_reply(connect, 503, "Content-Type: application/json\r\n",
+                      "{\"ok\":false}");
+      }
+      else
+      {
+        long value = mg_json_get_long(mg_str_n(hm->body.buf, hm->body.len),
+                                      "$.value", 0);
+        std::string envelope = Control::build_field_envelope(
+            ctx->config.device_id, field, value);
+        ctx->mqtt->publish(ctx->config.mqtt_topic_cmd, envelope);
+        if (ctx->device != nullptr)
+        {
+          ctx->device->update_from_control(envelope); // 同步缓存,UI 秒响应
+        }
+        mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
+                      "{\"ok\":true}");
       }
     }
 
