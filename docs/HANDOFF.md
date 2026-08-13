@@ -555,6 +555,24 @@ on_message(事件循环线程) → storage.enqueue_telemetry(payload)  只 push 
 
 **⚠️ 部署新情况(2026-08-13)**:板子切 WiFi 后 IP 变 `10.137.31.9`;`~/.ssh/config` 只配了有线 IP,连 WiFi 需手动 `-i ~/.ssh/id_rsa_gw`;本轮只传了 gateway 二进制 + web/index.html(config 未改未传)。
 
+### ✅ 2026-08-13 P4 + S1 修复轮(全部部署上板验证)
+
+> 范围:上一轮审查标记的"未修隐患"(P4 级)+ S1 XSS。修复 7 项,双架构编译 + 部署上板验证通过。至此上轮审查发现的 bug 全部闭环(仅剩 telemetry 无限增长 = 用户明确要求的"无限存",非 bug)。
+
+| # | 文件 | 问题 | 修复 |
+|---|---|---|---|
+| 1 | web/index.html | S1 XSS(addLog innerHTML 注入) | 改 DOM API(textContent/createTextNode),不再拼 innerHTML |
+| 2 | web/index.html | M7b 日志无上限(DOM 无界增长) | addLog 超 300 条删最旧 |
+| 3 | web/index.html | M5 setTimeout 未保存(快速启停残留) | streamLoadTimer 保存 id,stopStream 里 clearTimeout |
+| 4 | web/index.html | M7a 轮询无 in-flight 保护(请求堆积) | setInterval 加 polling 标志,响应慢时跳过本次 |
+| 5 | zigbee_adapter.cpp | M10 buffer_ 无上限(内存膨胀) | 超 64KB 清空(对端发无 `\n` 垃圾数据时) |
+| 6 | rule_engine.cpp/.h | M11 `==` 浮点精确比较 | op 白名单移除 `==`,只保留 `>`/`<`/`>=`/`<=` |
+| 7 | build-arm.sh | M14 cmake 错误被吞 + 不校验依赖 | 去 `/dev/null` 让配置输出可见 + 部署前校验板上 mosquitto/mjpg_streamer/ffmpeg/wget |
+
+**验证**:LSP 0 诊断;x86 + ARM 编译通过;前端 JS `node --check` 通过;部署上板 `/api/health` + `/api/rules`(4 条规则正常加载,移除 `==` 不影响现有规则)通过。
+
+**遗留(设计取舍,非 bug)**:telemetry 表无限增长(用户要求"无限存",板子 flash 有限,长期运行磁盘会满,答辩时提一句即可)。
+
 ### 📡 通信协议定稿(2026-08-11 盘点,唯一权威)
 
 > 来源:桌面《项目实现教程-v2.0.md》第 5 章(v1.0/开发流程指南里的命令表已过时,以本表为准)
