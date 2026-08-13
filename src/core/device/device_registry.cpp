@@ -1,4 +1,5 @@
 #include "core/device/device_registry.h"
+#include "core/common/json_util.h"   // json_escape(与 rule_engine/main.cpp 共用)
 #include "core/common/logger/logger.h"
 
 #include <cstdio>
@@ -6,39 +7,6 @@
 
 namespace gateway
 {
-    // ------------------------------------------------------------
-    // json_escape:JSON 字符串转义(防 description 里的引号/反斜杠破坏 JSON)
-    // 只处理常见危险字符:" \ \n \r \t 和控制字符
-    // ------------------------------------------------------------
-    static std::string json_escape(const std::string &s)
-    {
-        std::string out;
-        out.reserve(s.size() + 8);
-        for (char c : s)
-        {
-            switch (c)
-            {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20)
-                {
-                    char buf[8];
-                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-                    out += buf;
-                }
-                else
-                {
-                    out += c;
-                }
-            }
-        }
-        return out;
-    }
-
     // ------------------------------------------------------------
     // load:加载 sensors.yaml + actuators.yaml 到登记表
     // 两个文件结构相同:

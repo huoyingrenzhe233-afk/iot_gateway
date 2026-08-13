@@ -1,4 +1,5 @@
 #include "core/rules/rule_engine.h"
+#include "core/common/json_util.h"   // json_escape(与 device_registry/main.cpp 共用)
 #include "core/common/logger/logger.h"
 #include "core/control/control.h"
 #include "core/device/device_registry.h"
@@ -53,39 +54,6 @@ namespace gateway {
             {"buzzer_1", {"buzzer"}},
         };
         return m;
-    }
-
-    // ------------------------------------------------------------
-    // json_escape:JSON 字符串转义(防规则名/字段里的引号、反斜杠破坏 JSON)
-    // 与 device_registry.cpp 的 json_escape 逻辑保持一致
-    // ------------------------------------------------------------
-    static std::string json_escape(const std::string &s)
-    {
-        std::string out;
-        out.reserve(s.size() + 8);
-        for (char c : s)
-        {
-            switch (c)
-            {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20)
-                {
-                    char buf[8];
-                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-                    out += buf;
-                }
-                else
-                {
-                    out += c;
-                }
-            }
-        }
-        return out;
     }
 
     // ------------------------------------------------------------
