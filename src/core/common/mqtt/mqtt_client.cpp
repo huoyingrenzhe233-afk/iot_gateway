@@ -55,6 +55,16 @@ namespace gateway
       reconnect_timer_ = mg_timer_add(mgr_, 5000, MG_TIMER_REPEAT,
                                       &MqttClient::reconnect_timer, this);
     }
+
+    // 常驻心跳定时器:只建一次。keepalive=60,broker 在 1.5x(90s)无消息时
+    // 会强制断开(MQTT 3.1.1 规范)。每 30s(keepalive/2)发一次 PINGREQ
+    // 重置 broker 计时器 —— 修复空闲期每 ~95s 断连重连的循环
+    // (历史根因:网关从未调用 mg_mqtt_ping,见 mongoose.c:3852)。
+    if (ping_timer_ == nullptr)
+    {
+      ping_timer_ = mg_timer_add(mgr_, 30000, MG_TIMER_REPEAT,
+                                 &MqttClient::ping_timer, this);
+    }
   }
 
   // ------------------------------------------------------------
@@ -74,8 +84,19 @@ namespace gateway
     opts.topic = mg_str(topic.c_str());
     opts.message = mg_str(message.c_str());
     opts.qos = 1;
-    mg_mqtt_pub(conn, &opts); // 同步拷贝进发送缓冲,函数返回后 string 可析构
-    LOG_INFO("mqtt publish %s: %s", topic.c_str(), message.c_str());
+    // 同步拷贝进发送缓冲,函数返回后 string 可析构
+    // 返回值:成功返回 packet_id(QoS>0 时),失败返回 0(文档契约;
+    // 注:mongoose 在消息体发送的极晚期失败时可能仍返回非 0,此处按文档契约判 0)
+    uint16_t packet_id = mg_mqtt_pub(conn, &opts);
+    if (packet_id == 0)
+    {
+      LOG_ERROR("mqtt publish failed: %s", topic.c_str());
+    }
+    else
+    {
+      LOG_INFO("mqtt publish %s: %s (packet_id=%u)", topic.c_str(),
+               message.c_str(), static_cast<unsigned>(packet_id));
+    }
   }
 
   // ------------------------------------------------------------
@@ -158,6 +179,20 @@ namespace gateway
     if (self->conn == nullptr)
     { // 断线了才重连,连接正常就不打扰
       self->try_reconnect();
+    }
+  }
+
+  // ------------------------------------------------------------
+  // ping_timer:心跳定时器回调(每 30s 触发一次)
+  // 连接存活时发 PINGREQ:兑现 CONNECT 报文里的 keepalive=60 承诺,
+  // 防止 broker 在 1.5x keepalive(90s)无消息后强制断开连接。
+  // ------------------------------------------------------------
+  void MqttClient::ping_timer(void *arg)
+  {
+    MqttClient *self = static_cast<MqttClient *>(arg);
+    if (self->conn != nullptr)
+    {
+      mg_mqtt_ping(self->conn); // 发送 PINGREQ,重置 broker 侧 90s 计时器
     }
   }
 } // namespace gateway
