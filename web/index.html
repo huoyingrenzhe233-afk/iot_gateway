@@ -413,6 +413,7 @@
         // MJPEG 流加载重试:mjpg_streamer 启动有 1~2 秒延迟(摄像头初始化),
         // 首帧可能"连接被拒",而 <img> 不会自动重试 → 必须手动重试
         let streamRetry = 0;
+        let streamLoadTimer = null; // 启动流时的延迟加载定时器(stop 时清掉,防快速启停残留)
         video.onerror = () => {
             if (!streamStarted) return; // 已停止推流,不重试
             if (++streamRetry > 20) {
@@ -431,8 +432,17 @@
             const time = new Date().toLocaleTimeString();
             const line = document.createElement('div');
             line.className = 'log-line';
-            line.innerHTML = `<span class="log-time">[${time}]</span> ${msg}`;
+            // 用 DOM API(textContent)而非 innerHTML:防 msg 里的 <img onerror> 等注入执行(XSS)
+            const timeSpan = document.createElement('span');
+            timeSpan.className = 'log-time';
+            timeSpan.textContent = `[${time}] `;
+            line.appendChild(timeSpan);
+            line.appendChild(document.createTextNode(msg));
             box.appendChild(line);
+            // 日志行数上限:超 300 条删最旧,防长时间运行 DOM 无界增长
+            while (box.children.length > 300) {
+                box.removeChild(box.firstChild);
+            }
             box.scrollTop = box.scrollHeight; // 自动滚动到底部
         }
 
@@ -461,7 +471,7 @@
                 // ⚠️ mjpg_streamer 启动有 1~2 秒延迟,立即设 src 会"连接被拒"
                 // 导致坏图标;延迟 1.5s 再加载,配合 onerror 自动重试兜底
                 streamRetry = 0;
-                setTimeout(() => { video.src = STREAM_URL; }, 1500);
+                streamLoadTimer = setTimeout(() => { video.src = STREAM_URL; }, 1500);
                 addLog('✅ 视频流已启动(画面加载中...)');
                 streamStarted = true;
                 streamStartBtn.disabled = true;
@@ -476,6 +486,7 @@
             try {
                 addLog('正在停止视频流...');
                 video.src = '';
+                if (streamLoadTimer) { clearTimeout(streamLoadTimer); streamLoadTimer = null; }
                 // 若正在录像,先停录像(录像依赖推流,先停可让 ffmpeg 正常收尾,避免留下损坏文件)
                 if (recordStarted) {
                     try {
@@ -611,8 +622,11 @@ function setMotorDirUser(dir) {
         snapshotBtn.onclick = takeSnapshot;
         recordBtn.onclick = toggleRecord;
 
-        // 定时拉取传感器数据
+        // 定时拉取传感器数据(带 in-flight 保护,防响应慢时请求堆积乱序)
+        let polling = false;
         setInterval(() => {
+            if (polling) return; // 上一次还没返回,跳过本次
+            polling = true;
             fetch('/api/status').then(r => r.json()).then(data => {
                 // 渲染传感器数据
                 document.getElementById('val_temp').innerText = data.temp || '--';
@@ -638,6 +652,8 @@ function setMotorDirUser(dir) {
                 document.getElementById('conn_status').innerText = "● 连接断开";
                 document.getElementById('conn_status').style.color = "#ff4d4d";
                 addLog(`传感器数据获取失败: ${e.message}`);
+            }).finally(() => {
+                polling = false;
             });
         }, 1000);
 
