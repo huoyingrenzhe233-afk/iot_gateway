@@ -66,8 +66,12 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 - `src/core/rules/`:`RuleEngine`(yaml 加载/校验/边沿触发评估/启停/热重载)+ `/api/rules` 系列 4 个 API
 - 详见 5.7 节;P1 设计决策(映射表方案 A)已定稿落地
 
+### ✅ 阶段 8(摄像头接口)— 完成(2026-08-13,本机 + 板上真机验证)
+- `src/core/camera/`:`CameraManager`(mjpg-streamer 推流 / wget 抓拍 / ffmpeg -c copy 录像,零转码)+ 5 个 `/api/camera/*` 路由 + 前端页面伺服
+- 前端 `web/index.html`(方案 C:全链路 MJPEG);详见 5.8 节
+
 ### ⏳ 未开始
-- 规则引擎(20 分,待办 5.6)、WebSocket /ws、摄像头接口、板上验证阶段 3/4、/api/devices/:id
+- WebSocket /ws、/api/devices/:id、feature/device 开 PR 合 main
 
 ## 3. 环境信息
 
@@ -262,20 +266,56 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 
 **规则触发数据流**:`sensor 上报 → on_message → update_from_report(缓存) + evaluate(规则) → 边沿满足 → fire 组 cmd 信封 → on_action → publish(dev/mcu01/cmd) + update_from_control(缓存同步)`
 
+### ✅ 5.8 摄像头接口 — **已完成(2026-08-13,方案 C:全链路 MJPEG,零转码)**
+
+> 决策由用户拍板:**最稳路线 = 老师 plan.md 的 mjpg-streamer 参考实现**,不用 HLS/h264_rkmpp(RK3568 MPP 栈不稳定 + 延迟大)。前端 HTML 可改。
+
+**⚠️ API 名字以老师给的 `standard/index.html` 为准**(与 plan.md 表格不同):`start_stream`/`stop_stream`/`start_record`/`stop_record`/`snapshot`(plan.md 写的是 start/stop/record/start/record/stop)。网关**GET/POST 都接受**(HTML 用 GET,plan.md 写 POST)。
+
+**文件**:
+- 新增 `src/core/camera/camera_manager.h/.cpp`:`CameraManager` 类,fork+exec 管理子进程
+- `config` 加 `camera.device`(`/dev/video9`)/`camera.port`(8080);`main.cpp` 加 5 个路由 + `/` 静态伺服 + 僵尸收割定时器;`build-arm.sh` 加 web/ 部署
+- 前端:`web/index.html`(复制自 standard,改造 HLS→MJPEG)
+
+**三个功能(全部零转码)**:
+| 功能 | 实现 |
+|---|---|
+| 推流 | fork `mjpg_streamer`(input_uvc.so 读摄像头 → output_http.so 出 MJPEG 到 8080);stop 时 SIGTERM+waitpid |
+| 抓拍 | fork `wget -q -O snapshots/snapshot_<ts>.jpg http://127.0.0.1:8080/?action=snapshot`(阻塞 waitpid ~0.2s) |
+| 录像 | fork `ffmpeg -y -i http://127.0.0.1:8080/?action=stream -c copy records/record_<ts>.avi`(纯拷贝不编码) |
+
+**进程管理约定**:
+- `spawn()`:fork;子进程关 [3,_SC_OPEN_MAX) fd + stdout/stderr→/dev/null + execvp(失败 _exit(127))
+- 僵尸收割:main 里 `mg_timer_add` 5s REPEAT 调 `waitpid(-1, WNOHANG)`(reap_children)
+- 前端 `<img src="http://<host>:8080/?action=stream">` 直连流,网关不代理视频数据
+
+**接口(实测)**:
+- `GET|POST /api/camera/start_stream|stop_stream|start_record|stop_record` → `{"ok":true}` / 500 `{"ok":false,"message":...}`
+- `GET|POST /api/camera/snapshot` → `{"ok":true,"filename":"snapshot_<ts>.jpg"}` / 500
+- `GET|POST /api/camera/status` → `{"running":bool,"recording":bool}`
+- `GET /`、`GET /index.html` → 伺服 `web/index.html`(浏览器开 `http://<板子IP>:8081/`)
+
+**已知限制**:`start_stream` 返回的是"fork 成功",不校验 mjpg_streamer 是否真在 8080 伺服(摄像头没插 → input_uvc 打开失败 → 进程即退,但 API 仍回 ok)。演示前确认摄像头已插;`/api/camera/status` 可查真实运行态。
+
+**待验证(🟡)**:板上真机——插 USB 摄像头(0bda:d327)→ deploy → 浏览器开 8081 页面点"开始推流"看实时画面 + 抓拍 + 录像。
+
+> ✅ **板上真机已验证(2026-08-13)**:插摄像头后全链路测通——start_stream 真起 mjpg_streamer(8080 出流 38552B JPEG)、API 抓拍存 49640B jpg、录像 3s 存 1.7MB avi、status 正确反映 running/recording、stop_stream 进程正确退出。
+
 ### ⏳ 5.6 待办清单(按优先级)
 
 | 优先级 | 事项 | 说明 |
 |---|---|---|
 | ✅ 高 | **规则引擎(20 分)** | **已完成(2026-08-13)**,详见 5.7 |
-| 🔴 高 | **摄像头 5 接口** | 前端已调用:`/api/camera/start_stream`、`stop_stream`、`start_record`、`stop_record`、`snapshot`;网关未实现,联调前必补 |
+| ✅ 高 | **摄像头接口** | **已完成(2026-08-13)**,方案 C 详见 5.8 |
 | ✅ 中 | 板上验证阶段三/四 | **已完成(2026-08-13,P0)** |
 | ✅ 中 | 板上验证 MQTT 心跳修复 | **已完成(2026-08-13,P0)**:空闲期不再周期性断连 |
-| 🟡 中 | 板上验证规则引擎 | 部署后板上升级 rules.yaml → reload 生效(本机已验证;build-arm.sh 已加 rules/ 同步) |
+| ✅ 中 | 板上验证规则引擎 | **已完成(2026-08-13)**:板上实测 T2/T3/T4 全过 |
+| 🟡 中 | 板上验证摄像头 | **已完成(2026-08-13)**:插摄像头后真机测通推流/抓拍/录像(见 5.8 验证证据) |
 | 🟡 中 | `/api/devices/:id` 单设备详情 | 验收标准第 2 条,简单补 |
 | 🟡 中 | WebSocket /ws | 实时推送(替代轮询);消息格式见协议定稿 |
 | 🟢 低 | feature/device 开 PR 合 main | 阶段四落袋 |
 
-> P0(2026-08-13)已完成:6 个提交已 push;板上部署验证通过(含 MQTT 心跳修复)。
+> P0(2026-08-13)已完成:6 个提交已 push;板上部署验证通过(含 MQTT 心跳修复)。P1(规则引擎)、P2(摄像头)均已完成本机/板上验证,见 5.7/5.8。
 
 **⏳ 待定义:规则引擎的 id → MQTT 字段路径映射(写规则引擎前必做)**
 - 现状:两套标识并存——注册表 id(`temp_1`/`led_1`...)vs MQTT 字段(`$.body.data.temp`/`body.led_on`)
