@@ -8,16 +8,19 @@
 #include "core/common/logger/logger.h"   // 日志
 #include "core/common/mqtt/mqtt_client.h" // MQTT 客户端
 #include "core/control/control.h"        // 控制信封组包
+#include "core/camera/camera_manager.h"  // 摄像头管理(方案 C:mjpg-streamer MJPEG)
 #include "core/device/device.h"          // 设备状态管理(6 外设缓存)
 #include "core/device/device_registry.h" // 设备注册表(静态登记)
 #include "core/rules/rule_engine.h"      // 规则引擎(阶段七:/api/rules 系列 + 上报触发评估)
 #include <cstdio>
 #include <cstdlib>
+#include <sys/wait.h> // waitpid:僵尸进程收割(reap_children)
 #include <mongoose.h>
 static const char *VERSION = "1.0.0"; // /api/version 返回的版本号
 static const char *kRulesPath = "config/rules/rules.yaml"; // 规则配置文件路径(阶段七,reload 时也用它)
 
 using gateway::Control;
+using gateway::CameraManager;
 using gateway::log_level_from_string;
 using gateway::Logger;
 using gateway::LogLevel;
@@ -33,6 +36,7 @@ struct HttpContext
   gateway::Device *device = nullptr;   // 设备状态缓存(供 /api/status 读)
   gateway::DeviceRegistry *registry = nullptr; // 设备注册表(供 /api/devices)
   gateway::RuleEngine *rules = nullptr; // 规则引擎(供 /api/rules 系列路由)
+  gateway::CameraManager *camera = nullptr; // 摄像头管理(供 /api/camera/* 路由)
 };
 
 // ------------------------------------------------------------
@@ -55,6 +59,20 @@ static bool extract_rule_id(const struct mg_http_message *hm,
     return false;
   out = uri.substr(prefix.size(), uri.size() - prefix.size() - strlen(suffix));
   return !out.empty();
+}
+
+// ------------------------------------------------------------
+// 僵尸进程收割:每 5s 回收已退出的子进程(mjpg_streamer/ffmpeg/wget)
+// fork 出的子进程退出后若没人 waitpid 会留僵尸占进程表;
+// 事件循环单线程,这里用 waitpid(-1, WNOHANG) 非阻塞轮询一把收干净
+// ------------------------------------------------------------
+static void reap_children(void *arg)
+{
+  (void)arg; // 回调签名要求 void* 参数,这里用不到
+  while (waitpid(-1, NULL, WNOHANG) > 0)
+  {
+    // 循环收割,直到没有已退出子进程为止
+  }
 }
 
 // ------------------------------------------------------------
@@ -226,6 +244,145 @@ static void request_handler(struct mg_connection *connect, int event,
                        : "{\"ok\":false,\"message\":\"rule_not_found\"}");
     }
 
+    // ---- 摄像头路由(方案 C:mjpg-streamer 推流 + wget 抓拍 + ffmpeg 录像) ----
+    // 方法同时接受 GET 和 POST:老师给的 HTML 用 GET 直连,
+    // plan.md 写的是 POST —— 两种都认,避免前端联调踩坑
+
+    // GET/POST /api/camera/start_stream → 启动推流(fork mjpg_streamer)
+    else if (mg_match(hm->uri, mg_str("/api/camera/start_stream"), NULL) &&
+             (mg_match(hm->method, mg_str("GET"), NULL) ||
+              mg_match(hm->method, mg_str("POST"), NULL)))
+    {
+      if (ctx->camera == nullptr)
+      {
+        // 摄像头管理未初始化(防御性检查,理论上不会发生)
+        mg_http_reply(connect, 500, "Content-Type: application/json\r\n",
+                      "{\"ok\":false,\"message\":\"start_stream failed\"}");
+      }
+      else
+      {
+        bool ok = ctx->camera->start_stream();
+        mg_http_reply(connect, ok ? 200 : 500, "Content-Type: application/json\r\n",
+                      ok ? "{\"ok\":true}"
+                         : "{\"ok\":false,\"message\":\"start_stream failed\"}");
+      }
+    }
+
+    // GET/POST /api/camera/stop_stream → 停止推流(kill + waitpid)
+    else if (mg_match(hm->uri, mg_str("/api/camera/stop_stream"), NULL) &&
+             (mg_match(hm->method, mg_str("GET"), NULL) ||
+              mg_match(hm->method, mg_str("POST"), NULL)))
+    {
+      if (ctx->camera == nullptr)
+      {
+        mg_http_reply(connect, 500, "Content-Type: application/json\r\n",
+                      "{\"ok\":false,\"message\":\"stop_stream failed\"}");
+      }
+      else
+      {
+        bool ok = ctx->camera->stop_stream();
+        mg_http_reply(connect, ok ? 200 : 500, "Content-Type: application/json\r\n",
+                      ok ? "{\"ok\":true}"
+                         : "{\"ok\":false,\"message\":\"stop_stream failed\"}");
+      }
+    }
+
+    // GET/POST /api/camera/start_record → 开始录像(fork ffmpeg -c copy)
+    else if (mg_match(hm->uri, mg_str("/api/camera/start_record"), NULL) &&
+             (mg_match(hm->method, mg_str("GET"), NULL) ||
+              mg_match(hm->method, mg_str("POST"), NULL)))
+    {
+      if (ctx->camera == nullptr)
+      {
+        mg_http_reply(connect, 500, "Content-Type: application/json\r\n",
+                      "{\"ok\":false,\"message\":\"start_record failed\"}");
+      }
+      else
+      {
+        bool ok = ctx->camera->start_record();
+        mg_http_reply(connect, ok ? 200 : 500, "Content-Type: application/json\r\n",
+                      ok ? "{\"ok\":true}"
+                         : "{\"ok\":false,\"message\":\"start_record failed\"}");
+      }
+    }
+
+    // GET/POST /api/camera/stop_record → 停止录像(和 stop_stream 对称)
+    else if (mg_match(hm->uri, mg_str("/api/camera/stop_record"), NULL) &&
+             (mg_match(hm->method, mg_str("GET"), NULL) ||
+              mg_match(hm->method, mg_str("POST"), NULL)))
+    {
+      if (ctx->camera == nullptr)
+      {
+        mg_http_reply(connect, 500, "Content-Type: application/json\r\n",
+                      "{\"ok\":false,\"message\":\"stop_record failed\"}");
+      }
+      else
+      {
+        bool ok = ctx->camera->stop_record();
+        mg_http_reply(connect, ok ? 200 : 500, "Content-Type: application/json\r\n",
+                      ok ? "{\"ok\":true}"
+                         : "{\"ok\":false,\"message\":\"stop_record failed\"}");
+      }
+    }
+
+    // GET/POST /api/camera/snapshot → 抓拍一帧(wget 抓 ?action=snapshot)
+    // 成功返回文件名,前端可以拼 http://<host>:8081/snapshots/<文件名> 展示
+    else if (mg_match(hm->uri, mg_str("/api/camera/snapshot"), NULL) &&
+             (mg_match(hm->method, mg_str("GET"), NULL) ||
+              mg_match(hm->method, mg_str("POST"), NULL)))
+    {
+      if (ctx->camera == nullptr)
+      {
+        mg_http_reply(connect, 500, "Content-Type: application/json\r\n",
+                      "{\"ok\":false,\"message\":\"snapshot failed\"}");
+      }
+      else
+      {
+        std::string fn;
+        bool ok = ctx->camera->snapshot(fn);
+        if (ok)
+        {
+          mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
+                        "{\"ok\":true,\"filename\":\"%s\"}", fn.c_str());
+        }
+        else
+        {
+          mg_http_reply(connect, 500, "Content-Type: application/json\r\n",
+                        "{\"ok\":false,\"message\":\"snapshot failed\"}");
+        }
+      }
+    }
+
+    // GET/POST /api/camera/status → 状态查询(推流/录像是否在跑)
+    else if (mg_match(hm->uri, mg_str("/api/camera/status"), NULL) &&
+             (mg_match(hm->method, mg_str("GET"), NULL) ||
+              mg_match(hm->method, mg_str("POST"), NULL)))
+    {
+      bool running = (ctx->camera != nullptr) && ctx->camera->stream_running();
+      bool recording = (ctx->camera != nullptr) && ctx->camera->record_running();
+      mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
+                    "{\"running\":%s,\"recording\":%s}",
+                    running ? "true" : "false", recording ? "true" : "false");
+    }
+
+    // GET / 或 /index.html → 伺服 web/index.html(前端页面)
+    // 前端页面由网关伺服,浏览器开 http://<板子IP>:8081/ 即可;
+    // 页面里 <img> 直连 8080 的 mjpg-streamer 流,网关不代理视频数据
+    else if (mg_match(hm->uri, mg_str("/"), NULL) &&
+             mg_match(hm->method, mg_str("GET"), NULL))
+    {
+      struct mg_http_serve_opts opts = {};
+      opts.root_dir = "web"; // 资源根目录(必须非空,见 mongoose.h:1783)
+      mg_http_serve_file(connect, hm, "web/index.html", &opts);
+    }
+    else if (mg_match(hm->uri, mg_str("/index.html"), NULL) &&
+             mg_match(hm->method, mg_str("GET"), NULL))
+    {
+      struct mg_http_serve_opts opts = {};
+      opts.root_dir = "web";
+      mg_http_serve_file(connect, hm, "web/index.html", &opts);
+    }
+
     // 其他一切路径 → 404
     else
     {
@@ -281,6 +438,14 @@ int main(int argc, char *argv[])
   bool rules_ok = g_rules.load(kRulesPath, g_registry);
   LOG_INFO("rules loaded: %zu entries (%s)", g_rules.size(),
            rules_ok ? "ok" : "FAILED");
+  // 6.7 摄像头管理(static 常驻,方案 C:mjpg-streamer 推流 + wget 抓拍 + ffmpeg 录像)
+  //     fork 出的子进程(mjpg_streamer/ffmpeg/wget)由 reap_children 定时器收割
+  static gateway::CameraManager g_camera;
+  g_camera.set_config(config.camera_device, config.camera_port);
+  LOG_INFO("camera: device=%s port=%d", config.camera_device.c_str(),
+           config.camera_port);
+  // 6.8 僵尸进程收割定时器:每 5s 回收一次已退出子进程(不阻塞事件循环)
+  mg_timer_add(&mgr, 5000, MG_TIMER_REPEAT, reap_children, nullptr); // 僵尸收割
   // 7. 注册收到上报的回调(单片机发 sensor/status 时会触发)
   //    → 更新设备状态缓存(阶段二核心:/api/status 读的就是它)
   g_mqtt.on_message = [](const std::string &topic, const std::string &payload)
@@ -306,6 +471,7 @@ int main(int argc, char *argv[])
   ctx.device = &g_device;
   ctx.registry = &g_registry;
   ctx.rules = &g_rules;
+  ctx.camera = &g_camera;
   mg_http_listen(&mgr, listen_addr, request_handler, &ctx);
   LOG_INFO("http server listening on :%d", port);
 
