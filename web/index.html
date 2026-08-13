@@ -620,6 +620,27 @@ function setMotorDirUser(dir) {
             });
         }, 1000);
 
+        // ========== WebSocket:MQTT 消息实时推送到日志(阶段三验收 3.3.7#7) ==========
+        // 网关收到单片机 MQTT 上报后,会主动推 {"type":"mqtt_msg",...} 给所有
+        // 连接的 WS 客户端;这里收到就写进日志窗口(实时,不用轮询)
+        function connectWs() {
+            const wsUrl = `ws://${location.hostname}:${location.port || 8081}/ws`;
+            const ws = new WebSocket(wsUrl);
+            ws.onmessage = (ev) => {
+                try {
+                    const msg = JSON.parse(ev.data);
+                    if (msg.type === 'mqtt_msg') {
+                        addLog(`📡 MQTT ${msg.topic}: ${msg.payload}`);
+                    }
+                } catch (e) {
+                    // 非 JSON 消息忽略
+                }
+            };
+            ws.onopen = () => addLog('🔌 WebSocket 已连接(实时推送)');
+            ws.onclose = () => setTimeout(connectWs, 3000); // 断线 3s 后重连
+        }
+        connectWs();
+
         // 初始化日志
         addLog('[系统] 页面加载完成，设备控制就绪');
     </script>
