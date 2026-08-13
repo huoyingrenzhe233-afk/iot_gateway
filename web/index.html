@@ -391,7 +391,7 @@
 
     <script>
         // ========== 视频流核心配置 ==========
-        // MJPEG 流地址:mjpg-streamer 跑在 8080 端口,用 <img> 直接显示(方案 C,零转码)
+        // MJPEG 流地址:mjpg-streamer 跑在 8080 端口,用 <img> 直接显示(零转码)
         const STREAM_URL = `http://${location.hostname}:8080/?action=stream`;
         const API_START_STREAM = '/api/camera/start_stream';
         const API_STOP_STREAM = '/api/camera/stop_stream';
@@ -413,6 +413,7 @@
         // MJPEG 流加载重试:mjpg_streamer 启动有 1~2 秒延迟(摄像头初始化),
         // 首帧可能"连接被拒",而 <img> 不会自动重试 → 必须手动重试
         let streamRetry = 0;
+        let streamLoadTimer = null; // 启动流时的延迟加载定时器(stop 时清掉,防快速启停残留)
         video.onerror = () => {
             if (!streamStarted) return; // 已停止推流,不重试
             if (++streamRetry > 20) {
@@ -431,8 +432,17 @@
             const time = new Date().toLocaleTimeString();
             const line = document.createElement('div');
             line.className = 'log-line';
-            line.innerHTML = `<span class="log-time">[${time}]</span> ${msg}`;
+            // 用 DOM API(textContent)而非 innerHTML:防 msg 里的 <img onerror> 等注入执行(XSS)
+            const timeSpan = document.createElement('span');
+            timeSpan.className = 'log-time';
+            timeSpan.textContent = `[${time}] `;
+            line.appendChild(timeSpan);
+            line.appendChild(document.createTextNode(msg));
             box.appendChild(line);
+            // 日志行数上限:超 300 条删最旧,防长时间运行 DOM 无界增长
+            while (box.children.length > 300) {
+                box.removeChild(box.firstChild);
+            }
             box.scrollTop = box.scrollHeight; // 自动滚动到底部
         }
 
@@ -456,12 +466,12 @@
                 addLog('正在启动视频流...');
                 await sendCommand(API_START_STREAM);
 
-                // 方案 C:网关 fork mjpg_streamer 后,这里用 <img> 直连 MJPEG 流
+                // 网关 fork mjpg_streamer 后,这里用 <img> 直连 MJPEG 流
                 // (MJPEG 是所有浏览器原生支持的图片流,无需 Hls.js、无需转码)
                 // ⚠️ mjpg_streamer 启动有 1~2 秒延迟,立即设 src 会"连接被拒"
                 // 导致坏图标;延迟 1.5s 再加载,配合 onerror 自动重试兜底
                 streamRetry = 0;
-                setTimeout(() => { video.src = STREAM_URL; }, 1500);
+                streamLoadTimer = setTimeout(() => { video.src = STREAM_URL; }, 1500);
                 addLog('✅ 视频流已启动(画面加载中...)');
                 streamStarted = true;
                 streamStartBtn.disabled = true;
@@ -476,6 +486,18 @@
             try {
                 addLog('正在停止视频流...');
                 video.src = '';
+                if (streamLoadTimer) { clearTimeout(streamLoadTimer); streamLoadTimer = null; }
+                // 若正在录像,先停录像(录像依赖推流,先停可让 ffmpeg 正常收尾,避免留下损坏文件)
+                if (recordStarted) {
+                    try {
+                        await sendCommand(API_STOP_RECORD);
+                        recordStarted = false;
+                        recordBtn.innerHTML = '🔴 视频录制';
+                        addLog('⏹ 录像已随推流停止');
+                    } catch (e) {
+                        addLog(`⚠️ 停止录像出错: ${e.message}`);
+                    }
+                }
                 await sendCommand(API_STOP_STREAM);
 
                 streamStarted = false;
@@ -549,8 +571,14 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(msg)
+    }).then(async res => {
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.message || `HTTP ${res.status}`);
+        }
+        return res.json();
     }).catch(err => {
-        addLog(`指令发送失败: ${err.message}`);
+        addLog(`❌ 指令发送失败: ${err.message}`);
     });
 }
 
@@ -594,22 +622,26 @@ function setMotorDirUser(dir) {
         snapshotBtn.onclick = takeSnapshot;
         recordBtn.onclick = toggleRecord;
 
-        // 定时拉取传感器数据
+        // 定时拉取传感器数据(带 in-flight 保护,防响应慢时请求堆积乱序)
+        let polling = false;
         setInterval(() => {
+            if (polling) return; // 上一次还没返回,跳过本次
+            polling = true;
             fetch('/api/status').then(r => r.json()).then(data => {
                 // 渲染传感器数据
                 document.getElementById('val_temp').innerText = data.temp || '--';
                 document.getElementById('val_humi').innerText = data.humi || '--';
                 document.getElementById('val_light').innerText = data.light || '--';
                 const irBox = document.getElementById('val_ir');
-                irBox.innerText = data.ir>2000 ? "☢ 有人" : "安全";
-                irBox.style.color = data.ir ? "var(--danger)" : "var(--success)";
+                const irDetected = Number(data.ir) > 2000;
+                irBox.innerText = irDetected ? "☢ 有人" : "安全";
+                irBox.style.color = irDetected ? "var(--danger)" : "var(--success)";
 
                 // 同步硬件状态到前端控件
                 document.getElementById('led_sw').checked = data.led_on === 1;
-                document.getElementById('led_br').value = data.led_br || 50;
+                document.getElementById('led_br').value = data.led_br ?? 50;
                 document.getElementById('motor_sw').checked = data.motor_on === 1;
-                document.getElementById('motor_sp').value = data.motor_sp || 30;
+                document.getElementById('motor_sp').value = data.motor_sp ?? 30;
                 setMotorDirUI(data.motor_dir);
                 document.getElementById('buzzer_sw').checked = data.buzzer === 1;
 
@@ -620,10 +652,12 @@ function setMotorDirUser(dir) {
                 document.getElementById('conn_status').innerText = "● 连接断开";
                 document.getElementById('conn_status').style.color = "#ff4d4d";
                 addLog(`传感器数据获取失败: ${e.message}`);
+            }).finally(() => {
+                polling = false;
             });
         }, 1000);
 
-        // ========== WebSocket:MQTT 消息实时推送到日志(阶段三验收 3.3.7#7) ==========
+        // ========== WebSocket:MQTT 消息实时推送到日志 ==========
         // 网关收到单片机 MQTT 上报后,会主动推 {"type":"mqtt_msg",...} 给所有
         // 连接的 WS 客户端;这里收到就写进日志窗口(实时,不用轮询)
         function connectWs() {
@@ -644,7 +678,7 @@ function setMotorDirUser(dir) {
         }
         connectWs();
 
-        // ========== 通信通道切换(MQTT/ZigBee 双通道,验收:前端切换按钮) ==========
+        // ========== 通信通道切换(MQTT/ZigBee 双通道) ==========
         const channelBtn = document.getElementById('channelBtn');
         let currentTransport = 'mqtt';
 

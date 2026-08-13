@@ -16,7 +16,7 @@ BOARD_IP=192.168.5.70
 PORT=8081
 
 echo "==> [1/4] 配置交叉编译(build-arm)"
-cmake -B build-arm -DCMAKE_TOOLCHAIN_FILE="$TC_FILE" >/dev/null
+cmake -B build-arm -DCMAKE_TOOLCHAIN_FILE="$TC_FILE"
 
 echo "==> [2/4] 编译"
 cmake --build build-arm
@@ -26,6 +26,8 @@ file build-arm/gateway | grep -q aarch64 || { echo "❌ 产物不是 aarch64!"; 
 echo "    ✅ aarch64 OK"
 
 if [ "$1" = "--deploy" ]; then
+    echo "==> 校验板上运行时依赖(mosquitto/mjpg_streamer/ffmpeg/wget)"
+    ssh -o BatchMode=yes root@$BOARD_IP "for c in mosquitto mjpg_streamer ffmpeg wget; do which \$c >/dev/null 2>&1 && echo \"  OK \$c\" || echo \"  MISS \$c\"; done" 2>/dev/null
     echo "==> [4/5] 部署到板子 $BOARD_IP"
     ssh -o BatchMode=yes root@$BOARD_IP "pkill -x gateway || true; sleep 1" 2>/dev/null
     scp -o BatchMode=yes build-arm/gateway root@$BOARD_IP:/root/gateway

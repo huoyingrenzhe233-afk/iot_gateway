@@ -21,7 +21,7 @@ namespace gateway {
     // "body":{"data":{"temp":32.5,"humi":60,"light":320,"ir":2500}}}。
     // 评估时要用 mongoose 的 JSONPath 表达式去取数,所以先把 id 翻译成路径。
     //
-    // 一致性铁律:sensor_id 必须同时出现在本映射表 + 设备注册表,
+    // 约束:sensor_id 必须同时出现在本映射表 + 设备注册表,
     // 否则加载时直接拒掉该规则(防止 id 拼错导致"规则永不触发"的哑弹)。
     // ============================================================
     static const std::map<std::string, std::string> &sensor_paths()
@@ -70,10 +70,10 @@ namespace gateway {
     //
     // 文件级失败(文件缺失 / 缺 "rules" 列表 / YAML 解析异常)→ false
     // 单条规则校验失败 → LOG_WARN + continue 跳过(文件仍算解析成功)
-    // 校验规则(一致性铁律,防"规则永不触发"的哑弹):
+    // 校验规则(防"规则永不触发"的哑弹):
     //   1. id:非空 + 不重复(API 引用主键,重复会导致 set_enabled 歧义)
     //   2. sensor_id:必须在本文件传感器映射表里 + 注册表登记过
-    //   3. op:必须是 ">"/"<"/">="/"<="/"==" 之一
+    //   3. op:必须是 ">"/"<"/">="/"<=" 之一(不含 ==,浮点精确相等无意义)
     //   4. actuator_id:必须在本文件执行器白名单里 + 注册表登记过
     //   5. field:必须在对应执行器的白名单里
     // ------------------------------------------------------------
@@ -126,7 +126,7 @@ namespace gateway {
                              r.id.c_str());
                     continue;
                 }
-                // ③ sensor_id:映射表 + 注册表双重校验(一致性铁律)
+                // ③ sensor_id:映射表 + 注册表双重校验
                 const auto &sp = sensor_paths();
                 if (sp.find(r.sensor_id) == sp.end() ||
                     !registry.contains(r.sensor_id, "sensor"))
@@ -135,9 +135,10 @@ namespace gateway {
                              r.id.c_str(), r.sensor_id.c_str());
                     continue;
                 }
-                // ④ op:白名单比较符
+                // ④ op:白名单比较符(不含 ==:浮点精确相等在传感器场景无意义,
+                //    测量值几乎不会精确等于人为阈值,只支持大小比较)
                 if (r.op != ">" && r.op != "<" && r.op != ">=" &&
-                    r.op != "<=" && r.op != "==")
+                    r.op != "<=")
                 {
                     LOG_WARN("rules: rule '%s' invalid op '%s', skipped",
                              r.id.c_str(), r.op.c_str());
@@ -209,7 +210,7 @@ namespace gateway {
     }
 
     // ------------------------------------------------------------
-    // reload:热重载规则(老师要求的"运行时改配置"入口)
+    // reload:热重载规则(运行时改配置,不用重启)
     //
     // 重载保留运行时启停状态:先把旧规则的 enabled 快照下来,新规则里
     // 同 id 的规则沿用旧 enabled;新增规则用 yaml 里的默认值(true)。
@@ -314,7 +315,6 @@ namespace gateway {
         if (op == "<")  return actual < threshold;
         if (op == ">=") return actual >= threshold;
         if (op == "<=") return actual <= threshold;
-        if (op == "==") return actual == threshold;
         LOG_WARN("rules: unknown op '%s'", op.c_str());
         return false;
     }

@@ -1,9 +1,9 @@
 #pragma once
 
 // ============================================================
-// 设备状态管理(阶段二核心)
+// 设备状态管理
 //
-// 6 个外设(温湿度一体出 2 个测量字段,已与单片机侧确认 2026-08-12):
+// 6 个外设(温湿度一体出 2 个测量字段):
 //   LED 灯        → 执行器 led_on(0/1) + led_br(0-100)
 //   温湿度传感器  → 传感器 temp + humi
 //   蜂鸣器        → 执行器 buzzer(0/1)
@@ -21,7 +21,7 @@
 
 namespace gateway
 {
-    // 传感器测量值(上报字段,协议定稿:body.data.temp/humi/light/ir)
+    // 传感器测量值(上报字段:body.data.temp/humi/light/ir)
     struct SensorReading
     {
         std::string temp;  // 温度(温湿度传感器)
@@ -30,7 +30,7 @@ namespace gateway
         std::string ir;    // 红外(红外传感器)
     };
 
-    // 执行器状态(命令字段,协议定稿:body.led_on/.../buzzer)
+    // 执行器状态(命令字段:body.led_on/.../buzzer)
     // 注意:这是网关侧缓存的"最后一次下发的状态",不是传感器读数
     struct ActuatorState
     {
@@ -58,7 +58,7 @@ namespace gateway
         //   {"type":"cmd","dev":"mcu01","ts":"...","body":{"led_on":1,"led_br":80,"motor_on":0,"motor_sp":0,"motor_dir":0,"buzzer":0}}
         void update_from_control(const std::string &envelope);
 
-        // 生成 /api/status 的聚合 JSON(老师规范 10 字段)
+        // 生成 /api/status 的聚合 JSON(10 字段)
         // 返回:{"temp":"25.5","humi":"60.0","light":"500","ir":"2500",
         //        "led_on":1,"led_br":80,"motor_on":1,"motor_sp":50,"motor_dir":0,"buzzer":0}
         std::string get_status_json() const;

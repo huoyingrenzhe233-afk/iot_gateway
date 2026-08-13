@@ -141,7 +141,7 @@ namespace gateway
       std::string payload(mm->data.buf, mm->data.len);
       LOG_INFO("mqtt recv %s: %.*s", topic.c_str(), (int)mm->data.len,
                mm->data.buf);
-      // 交给外部回调(阶段四:解析信封、存库、广播)
+      // 交给外部回调(解析信封、存库、广播)
       if (on_message)
       {
         on_message(topic, payload);

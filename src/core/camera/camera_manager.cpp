@@ -1,5 +1,5 @@
 // ============================================================
-// 摄像头管理实现(方案 C:mjpg-streamer 推流 + wget 抓拍 + ffmpeg 录像)
+// 摄像头管理实现(mjpg-streamer 推流 + wget 抓拍 + ffmpeg 录像)
 // 进程模型:
 //   - 所有子进程都用 fork()+execvp() 启动(绝不用 system()/popen(),
 //     避免 shell 注入和阻塞事件循环)
@@ -9,6 +9,7 @@
 // ============================================================
 #include "core/camera/camera_manager.h"
 #include "core/common/logger/logger.h" // LOG_INFO/LOG_WARN/LOG_ERROR
+#include <cerrno>     // errno(ECHILD 等,waitpid 非阻塞探测用)
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -101,13 +102,14 @@ namespace gateway
 
   // ------------------------------------------------------------
   // start_stream:启动推流(fork mjpg_streamer)
-  // 已在跑(stream_pid_ > 0)则直接返回 false,不重复 fork
+  // 已在跑则直接返回 false,不重复 fork(用 stream_running 真实探测,
+  // 崩溃后的 stale pid 会被自动清理,允许重启)
   // ------------------------------------------------------------
   bool CameraManager::start_stream()
   {
-    if (stream_pid_ > 0)
+    if (stream_running())
     {
-      return false; // 已经在推流,别重复拉第二个 mjpg_streamer
+      return false; // 已经在推流(真实探测,崩溃后的 stale pid 会被清理)
     }
     // mjpg_streamer 命令行(与 shell 手敲等价,但走 fork+execvp):
     //   mjpg_streamer -i "input_uvc.so -d /dev/video9 -r 640x480 -f 15 -q 85"
@@ -134,9 +136,41 @@ namespace gateway
   }
 
   // ------------------------------------------------------------
-  // stop_stream:停止推流(SIGTERM + waitpid)
-  // SIGTERM 让 mjpg_streamer 优雅退出;waitpid 等它真正退完,
-  // 避免留下僵尸进程(僵尸由 reap_children 兜底,这里直接收掉更干净)
+  // stop_child:优雅停止一个子进程,不无限阻塞事件循环
+  //   SIGTERM 请求退出 → 每 50ms 非阻塞探测(WNOHANG) → 超时 SIGKILL 强杀
+  //   为什么:原 waitpid(pid,0) 若子进程卡死不响应 SIGTERM,事件循环冻结
+  //   返回 true = 进程已停止(pid 被置 -1)
+  // ------------------------------------------------------------
+  static bool stop_child(pid_t &pid, int timeout_ms)
+  {
+    if (pid <= 0)
+    {
+      return false; // 没在跑,没什么可停的
+    }
+    kill(pid, SIGTERM); // 请求优雅退出
+    int waited = 0;
+    while (waited < timeout_ms)
+    {
+      int st = 0;
+      pid_t r = waitpid(pid, &st, WNOHANG); // 非阻塞探测,不阻塞事件循环
+      if (r == pid || (r < 0 && errno == ECHILD))
+      {
+        pid = -1; // 已退出(本次收割)或已被 reap_children 收割
+        return true;
+      }
+      usleep(50 * 1000); // 50ms 后再探
+      waited += 50;
+    }
+    // 超时未退出:SIGKILL 强杀(SIGKILL 不可忽略/阻塞,进程必死)
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0); // 强杀后收尸,几乎立即返回
+    pid = -1;
+    return true;
+  }
+
+  // ------------------------------------------------------------
+  // stop_stream:停止推流(SIGTERM 优雅退出,超时 SIGKILL 兜底)
+  // 不再用阻塞 waitpid(pid,0),避免子进程卡死时冻结整个事件循环
   // ------------------------------------------------------------
   bool CameraManager::stop_stream()
   {
@@ -144,11 +178,10 @@ namespace gateway
     {
       return false; // 没在跑,没什么可停的
     }
-    kill(stream_pid_, SIGTERM);       // 发 SIGTERM 请求退出
-    waitpid(stream_pid_, NULL, 0);    // 阻塞等它退出
-    LOG_INFO("camera stream stopped: pid=%d", (int)stream_pid_);
-    stream_pid_ = -1;
-    return true;
+    pid_t old = stream_pid_;
+    bool ok = stop_child(stream_pid_, 3000); // 最多等 3s
+    LOG_INFO("camera stream stopped: pid=%d", (int)old);
+    return ok;
   }
 
   // ------------------------------------------------------------
@@ -158,7 +191,7 @@ namespace gateway
   // ------------------------------------------------------------
   bool CameraManager::start_record()
   {
-    if (record_pid_ > 0)
+    if (record_running())
     {
       return false; // 已经在录像
     }
@@ -199,11 +232,10 @@ namespace gateway
     {
       return false; // 没在录像
     }
-    kill(record_pid_, SIGTERM);
-    waitpid(record_pid_, NULL, 0);
-    LOG_INFO("camera record stopped: pid=%d", (int)record_pid_);
-    record_pid_ = -1;
-    return true;
+    pid_t old = record_pid_;
+    bool ok = stop_child(record_pid_, 3000); // 最多等 3s,让 ffmpeg 写完 AVI 尾
+    LOG_INFO("camera record stopped: pid=%d", (int)old);
+    return ok;
   }
 
   // ------------------------------------------------------------
@@ -247,18 +279,48 @@ namespace gateway
   }
 
   // ------------------------------------------------------------
-  // stream_running/record_running:进程是否还活着
-  // kill(pid, 0) 只探测进程存在、不发任何信号
-  // 注意:僵尸进程也会返回 0(进程存在但已退出),演示场景够用
+  // stream_running/record_running:进程是否真的还在运行
+  // 用 waitpid(pid, &st, WNOHANG) 非阻塞探测(替代 kill(pid,0)):
+  //   - 返回 0 = 还在运行(真 running)
+  //   - 返回 pid/ECHILD = 已退出(收割掉 stale pid,返回 false)
+  // 这样僵尸进程不再被误报为"运行中",崩溃后的 stale pid 也被自动清理
   // ------------------------------------------------------------
-  bool CameraManager::stream_running() const
+  bool CameraManager::stream_running()
   {
-    return stream_pid_ > 0 && kill(stream_pid_, 0) == 0;
+    if (stream_pid_ <= 0) return false;
+    int st = 0;
+    pid_t r = waitpid(stream_pid_, &st, WNOHANG);
+    if (r == 0) return true;     // 还在运行
+    if (r == stream_pid_)        // 已退出,本次收割到僵尸
+    {
+      stream_pid_ = -1;
+      return false;
+    }
+    if (errno == ECHILD)         // 已被 reap_children 收割,pid 失效
+    {
+      stream_pid_ = -1;
+      return false;
+    }
+    return true;                 // EINTR 等:保守认为还在跑
   }
 
-  bool CameraManager::record_running() const
+  bool CameraManager::record_running()
   {
-    return record_pid_ > 0 && kill(record_pid_, 0) == 0;
+    if (record_pid_ <= 0) return false;
+    int st = 0;
+    pid_t r = waitpid(record_pid_, &st, WNOHANG);
+    if (r == 0) return true;
+    if (r == record_pid_)
+    {
+      record_pid_ = -1;
+      return false;
+    }
+    if (errno == ECHILD)
+    {
+      record_pid_ = -1;
+      return false;
+    }
+    return true;
   }
 
 } // namespace gateway
