@@ -380,6 +380,23 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 
 **git 状态提醒**:本轮改动(src 修复 + CMakeLists + .gitignore)均未提交;`build-arm.sh` 有一处用户自己的未提交改动(部署时同步 `config/devices/` + 验证 `/api/devices`),提交前注意区分。
 
+### ✅ 2026-08-13 全代码审查(规则引擎 + 摄像头新增代码)
+
+> 范围:新增 rule_engine(452 行)、camera_manager(264 行)、main.cpp 集成(484 行),编译通过
+
+**结论:新增代码质量高,无功能性 bug ✅**
+
+| 文件 | 评价 |
+|---|---|
+| rule_engine.h/.cpp | ✅ 优秀:映射表(方案 A 落地)、双重校验(映射表+注册表)、边沿触发、热重载保留 enabled、json_escape |
+| camera_manager.h/.cpp | ✅ 优秀:fork+execvp(非 system 防注入)、子进程关 fd、僵尸收割、wget/ffmpeg 零转码 |
+| main.cpp 集成 | ✅ 规范:规则/摄像头接入 HttpContext、on_action 回调、reap_children 定时器 |
+
+**修复(注释过期,非 bug)**:
+- main.cpp 头部注释"阶段 1-3"→"阶段 1-8 全部集成";数据流注释去掉"WS"(未实现)
+
+**当前代码全貌**:15 源文件 + main.cpp,覆盖阶段 0-8(环境/骨架/配置/MQTT/设备/注册表/规则引擎/摄像头),全部本机验证通过,规则引擎+摄像头板上真机验证通过。
+
 ### 📡 通信协议定稿(2026-08-11 盘点,唯一权威)
 
 > 来源:桌面《项目实现教程-v2.0.md》第 5 章(v1.0/开发流程指南里的命令表已过时,以本表为准)
