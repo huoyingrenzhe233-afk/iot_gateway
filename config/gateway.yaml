@@ -1,5 +1,5 @@
 server:
-  port: 8080
+  port: 8081            # 网关 HTTP 端口(8080 被 mjpg-streamer 摄像头占用,勿改回 8080)
 mqtt:
   broker: "mqtt://127.0.0.1:1883"
   topic_report: "dev/mcu01/report"

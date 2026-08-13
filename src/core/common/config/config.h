@@ -9,7 +9,7 @@ namespace gateway
     // ------------------------------------------------------------
     struct Config
     {
-        int server_port = 8080;                    // HTTP 监听端口
+        int server_port = 8081;                    // HTTP 监听端口(8080 被 mjpg-streamer 占用)
         std::string mqtt_broker = "mqtt://127.0.0.1:1883"; // MQTT broker 地址(含协议前缀,与 gateway.yaml 一致)
         std::string mqtt_topic_report = "dev/mcu01/report"; // 订阅:单片机上报
         std::string mqtt_topic_cmd = "dev/mcu01/cmd";       // 发布:控制命令
