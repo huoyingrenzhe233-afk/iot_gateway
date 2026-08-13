@@ -34,9 +34,10 @@ if [ "$1" = "--deploy" ]; then
     scp -o BatchMode=yes config/gateway.yaml root@$BOARD_IP:/root/config/gateway.yaml
     scp -o BatchMode=yes -r config/devices root@$BOARD_IP:/root/config/  # 设备注册表(sensors/actuators.yaml)
     scp -o BatchMode=yes -r config/rules root@$BOARD_IP:/root/config/    # 规则引擎(rules.yaml)
+    scp -o BatchMode=yes -r web root@$BOARD_IP:/root/    # 前端页面(web/index.html)
     ssh -o BatchMode=yes root@$BOARD_IP "nohup /root/gateway $PORT > /root/gateway.out 2>&1 & sleep 1"
-    echo "==> 验证 /api/health + /api/version + /api/devices + /api/rules:"
-    ssh -o BatchMode=yes root@$BOARD_IP "wget -q -O- http://127.0.0.1:$PORT/api/health; echo; wget -q -O- http://127.0.0.1:$PORT/api/version; echo; wget -q -O- http://127.0.0.1:$PORT/api/devices; echo; wget -q -O- http://127.0.0.1:$PORT/api/rules; echo"
+    echo "==> 验证 /api/health + /api/version + /api/devices + /api/rules + 前端页面标题:"
+    ssh -o BatchMode=yes root@$BOARD_IP "wget -q -O- http://127.0.0.1:$PORT/api/health; echo; wget -q -O- http://127.0.0.1:$PORT/api/version; echo; wget -q -O- http://127.0.0.1:$PORT/api/devices; echo; wget -q -O- http://127.0.0.1:$PORT/api/rules; echo; wget -q -O- http://127.0.0.1:$PORT/ | head -c 80"
     echo ""
     echo "✅ 完成"
 else
