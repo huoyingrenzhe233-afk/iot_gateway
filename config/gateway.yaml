@@ -11,3 +11,6 @@ log:
 camera:
   device: "/dev/video9"   # USB 摄像头 V4L2 节点(插上后一般是 video9)
   port: 8080              # mjpg-streamer HTTP 端口(前端 <img> 直连这个端口)
+zigbee:
+  device: "/dev/ttyS4"   # DL-30 无线串口模块接的 UART
+  baud: 115200           # 波特率(DL-30 配置一致)

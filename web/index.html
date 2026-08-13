@@ -303,7 +303,10 @@
 
     <div class="header">
         <div style="font-size: 20px; font-weight: 800; letter-spacing: 1px;">RK3568 智能网关控制系统</div>
-        <div class="status-tag" id="conn_status">● 设备在线</div>
+        <div style="display: flex; gap: 12px; align-items: center;">
+            <button id="channelBtn" class="btn" style="background: rgba(255,255,255,0.15); color:#fff; border:1px solid rgba(255,255,255,0.4); padding:6px 14px; border-radius:8px; cursor:pointer; font-size:13px;">📡 通道:MQTT</button>
+            <div class="status-tag" id="conn_status">● 设备在线</div>
+        </div>
     </div>
 
     <div class="main-grid">
@@ -640,6 +643,41 @@ function setMotorDirUser(dir) {
             ws.onclose = () => setTimeout(connectWs, 3000); // 断线 3s 后重连
         }
         connectWs();
+
+        // ========== 通信通道切换(MQTT/ZigBee 双通道,验收:前端切换按钮) ==========
+        const channelBtn = document.getElementById('channelBtn');
+        let currentTransport = 'mqtt';
+
+        function updateChannelBtn(t) {
+            currentTransport = t;
+            channelBtn.innerText = t === 'zigbee' ? '📡 通道:ZigBee' : '📡 通道:MQTT';
+        }
+
+        async function toggleChannel() {
+            const target = currentTransport === 'mqtt' ? 'zigbee' : 'mqtt';
+            try {
+                const res = await fetch('/api/channel/switch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ transport: target })
+                });
+                const data = await res.json();
+                if (data.ok) {
+                    updateChannelBtn(target);
+                    addLog(`🔄 已切换到 ${target === 'zigbee' ? 'ZigBee' : 'MQTT'} 通道`);
+                } else {
+                    addLog(`⚠️ 切换失败: ${data.message || '通道未就绪'}`);
+                }
+            } catch (err) {
+                addLog(`⚠️ 切换失败: ${err.message}`);
+            }
+        }
+        channelBtn.onclick = toggleChannel;
+
+        // 启动时查询当前通道,同步按钮显示
+        fetch('/api/channel').then(r => r.json()).then(d => {
+            if (d.transport) updateChannelBtn(d.transport);
+        }).catch(() => {});
 
         // 初始化日志
         addLog('[系统] 页面加载完成，设备控制就绪');

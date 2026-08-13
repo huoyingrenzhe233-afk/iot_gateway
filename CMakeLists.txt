@@ -20,7 +20,11 @@ add_executable(gateway
     src/core/device/device_registry.cpp
     src/core/rules/rule_engine.cpp
     src/core/camera/camera_manager.cpp
+    src/core/storage/sqlite_store.cpp
+    src/core/channel/zigbee_adapter.cpp
+    src/core/channel/channel_manager.cpp
     third_party/mongoose.c
+    third_party/sqlite3.c
 )
 target_include_directories(gateway PRIVATE
     src
@@ -29,6 +33,7 @@ target_include_directories(gateway PRIVATE
 target_link_libraries(gateway PRIVATE
     pthread
     yaml-cpp
+    dl
 )
 
 # ------------------------------------------------------------

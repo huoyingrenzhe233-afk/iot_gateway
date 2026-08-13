@@ -17,6 +17,8 @@ namespace gateway
     //   log.level          → cfg.log_level         (日志级别)
     //   camera.device      → cfg.camera_device     (摄像头 V4L2 节点)
     //   camera.port        → cfg.camera_port       (mjpg-streamer HTTP 端口)
+    //   zigbee.device      → cfg.zigbee_device     (ZigBee DL-30 串口设备节点)
+    //   zigbee.baud        → cfg.zigbee_baud       (串口波特率)
     //
     // 容错:文件不存在/解析失败时,打印告警并返回默认值(Config 结构体
     // 的成员默认值),程序照常启动 —— 不会因为配置问题崩溃
@@ -50,6 +52,11 @@ namespace gateway
                 cfg.camera_device = root["camera"]["device"].as<std::string>();
             if (root["camera"]["port"])
                 cfg.camera_port = root["camera"]["port"].as<int>();
+
+            if (root["zigbee"]["device"])
+                cfg.zigbee_device = root["zigbee"]["device"].as<std::string>();
+            if (root["zigbee"]["baud"])
+                cfg.zigbee_baud = root["zigbee"]["baud"].as<int>();
         }
         catch (const std::exception &e)
         {
