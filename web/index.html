@@ -407,6 +407,19 @@
         const snapshotBtn = document.getElementById('snapshotBtn');
         const recordBtn = document.getElementById('recordBtn');
 
+        // MJPEG 流加载重试:mjpg_streamer 启动有 1~2 秒延迟(摄像头初始化),
+        // 首帧可能"连接被拒",而 <img> 不会自动重试 → 必须手动重试
+        let streamRetry = 0;
+        video.onerror = () => {
+            if (!streamStarted) return; // 已停止推流,不重试
+            if (++streamRetry > 20) {
+                addLog('❌ 视频流连接失败,请检查摄像头是否连接');
+                return;
+            }
+            // 加时间戳参数强制浏览器重新发起请求(绕过缓存)
+            setTimeout(() => { video.src = STREAM_URL + '?t=' + Date.now(); }, 1000);
+        };
+
         let currentDir = 0;
 
         // 写入日志函数（增强，兼容视频流日志）
@@ -442,8 +455,11 @@
 
                 // 方案 C:网关 fork mjpg_streamer 后,这里用 <img> 直连 MJPEG 流
                 // (MJPEG 是所有浏览器原生支持的图片流,无需 Hls.js、无需转码)
-                video.src = STREAM_URL;
-                addLog('✅ 视频流已连接');
+                // ⚠️ mjpg_streamer 启动有 1~2 秒延迟,立即设 src 会"连接被拒"
+                // 导致坏图标;延迟 1.5s 再加载,配合 onerror 自动重试兜底
+                streamRetry = 0;
+                setTimeout(() => { video.src = STREAM_URL; }, 1500);
+                addLog('✅ 视频流已启动(画面加载中...)');
                 streamStarted = true;
                 streamStartBtn.disabled = true;
                 streamStopBtn.disabled = false;
