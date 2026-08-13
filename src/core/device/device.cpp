@@ -74,23 +74,39 @@ namespace gateway
         else if (type_str == "status")
         {
             // 执行器状态回执:body.items[] = {name, state, value}
-            // 遍历 items 数组,按 name 匹配更新对应执行器状态
-            // 终止条件:先试 mg_json_get_tok 判断 items[i].value 节点是否存在,
-            // 节点不存在(tok.len==0)= 遍历完。不用 mg_json_get_long 的 -1
-            // 默认值判断(会和合法值 -1 冲突,字符串值也会返回 -1)
+            // 遍历 items 数组,按 name 匹配更新对应执行器状态。
+            // "数组到头"和"某项缺 value"是两个概念,必须分开判断:
+            //   1) items[i] 本身不存在 → 下标越界 = 数组遍历完 → break
+            //   2) items[i] 存在但缺 value 字段 → 只跳过这一项,继续下一项
+            // 不能用 items[i].value 当终止条件:某项缺 value 会被误判成
+            // "数组到头",后面所有项被静默丢弃;也不对缺 value 的项按 0
+            // 处理(会把执行器状态误清零)。
+            // 不用 mg_json_get_long 的 -1 默认值判断(会和合法值 -1 冲突,
+            // 字符串值也会返回 -1)
             for (int i = 0; i < 16; i++) // 上限 16 项,防死循环
             {
                 char path[64];
-                std::snprintf(path, sizeof(path), "$.body.items[%d].value", i);
+                // 1. 终止判断:这一项本身存在吗?不存在 = 数组遍历完
+                std::snprintf(path, sizeof(path), "$.body.items[%d]", i);
                 struct mg_str tok = mg_json_get_tok(json, path);
-                if (tok.len == 0) break; // 节点不存在 = 遍历完
-                long val = mg_json_get_long(json, path, 0);
+                if (tok.len == 0) break; // 下标越界 = 遍历完
 
                 // 取 name 字段(字符串,去引号)
                 std::snprintf(path, sizeof(path), "$.body.items[%d].name", i);
                 char *name = mg_json_get_str(json, path);
                 std::string name_str = name ? name : "";
                 free(name);
+
+                // 2. value 存在性:缺 value 只跳过这一项,不中断整个循环
+                std::snprintf(path, sizeof(path), "$.body.items[%d].value", i);
+                struct mg_str vtok = mg_json_get_tok(json, path);
+                if (vtok.len == 0)
+                {
+                    LOG_WARN("device: status item '%s' missing value field, skipped",
+                             name_str.c_str());
+                    continue;
+                }
+                long val = mg_json_get_long(json, path, 0);
 
                 // 按 name 映射到执行器字段(兼容短名/长名两套命名)
                 if (name_str == "led" || name_str == "led_on")
