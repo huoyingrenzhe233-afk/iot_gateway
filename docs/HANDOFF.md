@@ -367,6 +367,29 @@ on_message(事件循环线程) → storage.enqueue_telemetry(payload)  只 push 
 
 **验证**:单元测试全过(完整+单独字段写入、status/垃圾过滤、100 条压测、规则状态覆盖生效、优雅 shutdown);host + ARM(aarch64)双构建通过,ARM 二进制已含 sqlite3_open 符号。
 
+### ✅ 5.12 ZigBee 双通道切换 — **已完成(2026-08-13,真机全链路测通)**
+
+> 老师 3.5.3:ZigBee 适配器(串口通信,设备入网/数据上报)。硬件:DL-30 无线串口模块(透明透传),接 RK3568 的 `/dev/ttyS4`,波特率 115200。验收:前端切换按钮 + 真通信。
+
+**DL-30 关键认知**:DL-30 是**透明无线串口桥**,不是带协议栈的协调器——网关写串口字节 → 无线发到单片机侧 DL-30 RX(反之亦然)。"组网/配对"由 DL-30 自身完成,网关只管串口收发。**每条消息必须 `\n` 结尾分帧**(模块文档)。
+
+**文件**:
+- 新增 `src/core/channel/zigbee_adapter.h/.cpp`:串口透传(POSIX termios 115200 8N1 非阻塞 + `\n` 分帧 + CRLF 兼容 + 部分帧缓冲)
+- 新增 `src/core/channel/channel_manager.h/.cpp`:策略模式通道路由(`switch_to` 就绪检查、`send_to_mcu` 按当前通道分发)
+- config 加 `zigbee.device`(`/dev/ttyS4`)/`zigbee.baud`(115200);main.cpp 统一 `handle_incoming`(MQTT+ZigBee 共链)、3 处命令下发改走 `send_to_mcu`、2 个新路由;前端 header 加通道切换按钮
+
+**接口(实测)**:
+- `GET /api/channel` → `{"transport":"mqtt"/"zigbee"}`
+- `POST /api/channel/switch` body `{"transport":"..."}` → 200 成功 / 400 缺参或非法 / **503 目标通道未就绪**(DL-30 未插)
+
+**🔴 关键踩坑(必读)**:`mg_wrapfd` 不能包装串口——mongoose 的读路径用 `recv()`(socket 专用),串口/PTY 这类普通 fd 会返回 **ENOTSOCK(err 88)** → mongoose 直接关连接。**正解:串口 fd 设 O_NONBLOCK,用 `mg_timer`(50ms REPEAT)定时 `read()` 轮询**,与事件循环同线程。已用 **PTY 伪终端**端到端验证(分帧/部分帧缓冲/CRLF/收发全过)。
+
+**数据流**:命令下行 → `ChannelManager::send_to_mcu` → [MQTT publish | ZigBee 串口 send(+\n)];上行 → [MQTT on_message | ZigBee 串口 poll_serial 分帧] → 统一 `handle_incoming`(缓存+规则+落库+WS)。
+
+**✅ 真机验证(2026-08-13)**:DL-30 接 ttyS4 + Windows 端 CH340→COM8。全链路测通——上行:COM8 发 sensor(temp=66)→ 网关 `incoming[dev/mcu01/zigbee]` → `/api/status` temp=66 + `/api/history` 落库;规则引擎自动触发(temp>30 → buzzer:1)经 zigbee 下行回 COM8。切换按钮 200/503 正确。
+
+**🔴 排障教训(必读)**:真机"双向完全沉默"排查了半天,代码、波特率(115200/9600 都试)、TX/RX 交叉都排除了,最后是 **DL-30 接线接触不良(没插稳)**。**区分代码 bug vs 硬件问题的铁证**:写独立 C 程序(open+termios+read)在板子上直读 `/dev/ttyS4`,若它也收 0 字节 → 硬件问题,不是代码。同时 `cat /proc/tty/driver/serial` 看 `tx:76 rx:0`(发了没收到)能快速定位方向。
+
 ### ⏳ 5.6 待办清单(按优先级)
 
 | 优先级 | 事项 | 说明 |
@@ -381,10 +404,10 @@ on_message(事件循环线程) → storage.enqueue_telemetry(payload)  只 push 
 | ✅ 中 | `POST /api/actuators/:id/set` 单执行器 | **已完成(2026-08-13)**,详见 5.9(老师验收 3.2.5#5) |
 | ✅ 中 | WebSocket /ws | **已完成(2026-08-13)**,详见 5.10(阶段三验收 3.3.7#7) |
 | ✅ 中 | **SQLite 遥测持久化** | **已完成(2026-08-13)**,详见 5.11(队列+写线程,规则状态落库) |
-| 🔴 高 | **ZigBee 双通道切换** | DL-30 透传串口模块(待确认波特率/UART 号);抽象层 + 切换按钮 + 真串口通信 |
+| ✅ 高 | **ZigBee 双通道切换** | **已完成(2026-08-13,真机全链路测通)**,详见 5.12 |
 | ✅ 低 | feature/device 开 PR 合 main | **已合并(2026-08-13,用户操作)** |
 
-> P0(2026-08-13)已完成:6 个提交已 push;板上部署验证通过(含 MQTT 心跳修复)。P1(规则引擎)、P2(摄像头)均已完成本机/板上验证,见 5.7/5.8。SQLite 持久化已完成(5.11);ZigBee 双通道为下一步。
+> P0(2026-08-13)已完成:6 个提交已 push;板上部署验证通过(含 MQTT 心跳修复)。P1(规则引擎)、P2(摄像头)均已完成本机/板上验证,见 5.7/5.8。SQLite 持久化(5.11)、ZigBee 双通道(5.12)已完成。
 
 **⏳ 待定义:规则引擎的 id → MQTT 字段路径映射(写规则引擎前必做)**
 - 现状:两套标识并存——注册表 id(`temp_1`/`led_1`...)vs MQTT 字段(`$.body.data.temp`/`body.led_on`)
