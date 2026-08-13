@@ -341,6 +341,32 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 
 **验证**:Python 原始 socket 实现 WS 客户端测通——握手 101、发 `{"topic","payload"}` 回 `mqtt_pub_ack`、缺 topic 回 `missing_topic`、外部 mosquitto_pub 上报后收到 `mqtt_msg` 广播,三链全通。
 
+### ✅ 5.11 SQLite 遥测持久化 — **已完成(2026-08-13,队列+写线程)**
+
+> 老师 3.5.4:① 设备遥测历史记录 ② 规则配置持久化 ③ 前端历史曲线展示。用户确认:无限存、规则运行时状态落库、高频上报需优化。
+
+**方案**:vendor sqlite3 amalgamation(`third_party/sqlite3.c/.h`,3.45.1,同 mongoose 模式)——避开 host 装 dev 头 + ARM sysroot 交叉编译的麻烦,一条二进制搞定。⚠️ sqlite3.c 是**纯 C,必须用 C 编译器编译**(g++ 编会报 redefinition/wliteral-suffix,CMake 的 .c 自动走 C 编译器,没问题)。
+
+**性能优化(队列 + 写线程)**——应对"单片机单独发各传感器字段"的高频场景:
+```
+on_message(事件循环线程) → storage.enqueue_telemetry(payload)  只 push 队列,微秒级,零磁盘 IO
+        ↓ (mutex + condition_variable,唯一跨线程共享)
+写线程(独立) → 每 1s 或唤醒时 drain → 单事务批量 INSERT(ms 级磁盘 IO 全在独立线程)
+```
+事件循环永不碰磁盘,单片机一秒几十条上报也不影响 HTTP/MQTT 响应延迟。
+
+**表结构**:
+- `telemetry(id PK AUTOINCREMENT, ts TEXT, temp/humi/light/ir REAL)` —— 无限存;字段可 NULL(单独上报时缺省)
+- `rules_state(rule_id PK, enabled INTEGER)` —— 规则启停状态落库,重启后恢复
+
+**接口**:`GET /api/history?limit=N`(缺省 100)→ 最近 N 条遥测,时间升序 JSON 数组(前端曲线用;NULL 字段省略键)。
+
+**文件**:`src/core/storage/sqlite_store.h/.cpp`;CMake 加 sqlite3.c + sqlite_store.cpp + `dl` 库;.gitignore 加 gateway.db(-wal/-shm)。
+
+**线程安全**:唯一跨线程共享的是 pending_ 队列(mutex 保护);所有 sqlite 访问由 db_mutex_ 串行化(单连接多线程安全);stop_ 用 std::atomic。
+
+**验证**:单元测试全过(完整+单独字段写入、status/垃圾过滤、100 条压测、规则状态覆盖生效、优雅 shutdown);host + ARM(aarch64)双构建通过,ARM 二进制已含 sqlite3_open 符号。
+
 ### ⏳ 5.6 待办清单(按优先级)
 
 | 优先级 | 事项 | 说明 |
@@ -354,9 +380,11 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 | ✅ 中 | `/api/devices/:id` 单设备详情 | **已完成(2026-08-13)**,详见 5.9 |
 | ✅ 中 | `POST /api/actuators/:id/set` 单执行器 | **已完成(2026-08-13)**,详见 5.9(老师验收 3.2.5#5) |
 | ✅ 中 | WebSocket /ws | **已完成(2026-08-13)**,详见 5.10(阶段三验收 3.3.7#7) |
-| 🟢 低 | feature/device 开 PR 合 main | 阶段四落袋 |
+| ✅ 中 | **SQLite 遥测持久化** | **已完成(2026-08-13)**,详见 5.11(队列+写线程,规则状态落库) |
+| 🔴 高 | **ZigBee 双通道切换** | DL-30 透传串口模块(待确认波特率/UART 号);抽象层 + 切换按钮 + 真串口通信 |
+| ✅ 低 | feature/device 开 PR 合 main | **已合并(2026-08-13,用户操作)** |
 
-> P0(2026-08-13)已完成:6 个提交已 push;板上部署验证通过(含 MQTT 心跳修复)。P1(规则引擎)、P2(摄像头)均已完成本机/板上验证,见 5.7/5.8。
+> P0(2026-08-13)已完成:6 个提交已 push;板上部署验证通过(含 MQTT 心跳修复)。P1(规则引擎)、P2(摄像头)均已完成本机/板上验证,见 5.7/5.8。SQLite 持久化已完成(5.11);ZigBee 双通道为下一步。
 
 **⏳ 待定义:规则引擎的 id → MQTT 字段路径映射(写规则引擎前必做)**
 - 现状:两套标识并存——注册表 id(`temp_1`/`led_1`...)vs MQTT 字段(`$.body.data.temp`/`body.led_on`)
