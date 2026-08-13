@@ -48,24 +48,27 @@ static void request_handler(struct mg_connection *connect, int event,
     LOG_INFO("HTTP %.*s %.*s", (int)hm->method.len, hm->method.buf,
              (int)hm->uri.len, hm->uri.buf);
 
-    // ---- 路由表:按 URI 匹配 ----
+    // ---- 路由表:按 URI + method 匹配(防 POST/DELETE 误触发 GET 端点) ----
 
     // GET /api/version → 返回版本号
-    if (mg_match(hm->uri, mg_str("/api/version"), NULL) == true)
+    if (mg_match(hm->uri, mg_str("/api/version"), NULL) &&
+        mg_match(hm->method, mg_str("GET"), NULL))
     {
       mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
                     "{\"version\":\"%s\"}", VERSION);
     }
 
     // GET /api/health → 健康检查(存活探针)
-    else if (mg_match(hm->uri, mg_str("/api/health"), NULL) == true)
+    else if (mg_match(hm->uri, mg_str("/api/health"), NULL) &&
+             mg_match(hm->method, mg_str("GET"), NULL))
     {
       mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
                     "{\"status\":\"ok\"}");
     }
 
     // GET /api/devices → 设备列表(注册表,老师验收:至少 3 传感器+3 执行器)
-    else if (mg_match(hm->uri, mg_str("/api/devices"), NULL) == true)
+    else if (mg_match(hm->uri, mg_str("/api/devices"), NULL) &&
+             mg_match(hm->method, mg_str("GET"), NULL))
     {
       if (ctx->registry != nullptr)
       {
@@ -81,7 +84,8 @@ static void request_handler(struct mg_connection *connect, int event,
     }
 
     // GET /api/status → 设备状态聚合(Web/Qt 轮询接口)
-    else if (mg_match(hm->uri, mg_str("/api/status"), NULL) == true)
+    else if (mg_match(hm->uri, mg_str("/api/status"), NULL) &&
+             mg_match(hm->method, mg_str("GET"), NULL))
     {
       if (ctx->device != nullptr)
       {
