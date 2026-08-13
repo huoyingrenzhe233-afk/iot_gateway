@@ -415,6 +415,23 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 
 **当前代码全貌**:15 源文件 + main.cpp,覆盖阶段 0-8(环境/骨架/配置/MQTT/设备/注册表/规则引擎/摄像头),全部本机验证通过,规则引擎+摄像头板上真机验证通过。
 
+### ✅ 2026-08-13 全代码审查(5.9 设备接口补全)
+
+> 范围:5.9 新增的 `/api/devices/:id` + `/api/actuators/:id/set` 路由、`build_field_envelope` 重构、`to_json_detail`/`find`/`contains`
+
+**结论:全部通过 ✅,无功能性 bug**
+
+| 文件 | 评价 |
+|---|---|
+| main.cpp 两个新路由 | ✅ 规范:方法校验、404/400/503 状态码齐全、`extract_device/actuator_id` 边界处理 |
+| device_registry `find`/`to_json_detail` | ✅ 好:线性扫描 + json_escape + online/last_seen 逻辑 |
+| control `build_field_envelope` | ✅ 好:命令信封单一来源,消除 control/rule_engine/main 三处重复组包 |
+
+**⚠️ 维护性提醒(非 bug,记录备查)**:
+- `main.cpp` 的 `actuator_primary_field`(主开关字段)与 `rule_engine.cpp` 的 `actuator_fields`(可下发字段白名单)是**两张独立映射表**,内容有重叠(led_1→led_on 等)
+- 语义不同:前者取"主开关字段"(开关语义),后者列"所有可下发字段"(全集)——**当前 3 执行器硬编码可接受**;若以后加执行器,两处都要改,易漏
+- 若嫌重复,可后续统一到公共头文件或 device_registry
+
 ### 📡 通信协议定稿(2026-08-11 盘点,唯一权威)
 
 > 来源:桌面《项目实现教程-v2.0.md》第 5 章(v1.0/开发流程指南里的命令表已过时,以本表为准)
