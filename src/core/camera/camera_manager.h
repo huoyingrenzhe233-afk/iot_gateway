@@ -30,9 +30,9 @@ namespace gateway
         bool stop_record();
         // 抓拍:fork wget 抓一帧存 snapshots/snapshot_<ts>.jpg;成功回填 filename(纯文件名)
         bool snapshot(std::string &filename);
-        // 状态查询(推流/录像是否在跑)
-        bool stream_running() const;
-        bool record_running() const;
+        // 状态查询(推流/录像是否在跑;会探测并清理已退出的 stale pid)
+        bool stream_running();
+        bool record_running();
 
     private:
         pid_t stream_pid_ = -1;     // mjpg_streamer 进程号(-1=未启动)
