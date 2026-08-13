@@ -231,13 +231,15 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 
 | 优先级 | 事项 | 说明 |
 |---|---|---|
-| 🔴 高 | **规则引擎(20 分)** | 4 个 API:/api/rules、reload、:id/enable、:id/disable;**先定"id→MQTT 字段映射"**(见下方待定义) |
+| 🔴 高 | **规则引擎(20 分)** 🔄 进行中 | 4 个 API:/api/rules、reload、:id/enable、:id/disable;**先定"id→MQTT 字段映射"**(见下方待定义) |
 | 🔴 高 | **摄像头 5 接口** | 前端已调用:`/api/camera/start_stream`、`stop_stream`、`start_record`、`stop_record`、`snapshot`;网关未实现,联调前必补 |
-| 🟡 中 | 板上验证阶段三/四 | 本机已过;板上部署 `./build-arm.sh --deploy` 后验证 |
-| 🟡 中 | 板上验证 MQTT 心跳修复 | 部署后让单片机停止上报几分钟,确认不再出现 ~95s 周期性 `mqtt disconnected`(修复见 2026-08-13 节) |
+| ✅ 中 | 板上验证阶段三/四 | **已完成(2026-08-13,P0)** |
+| ✅ 中 | 板上验证 MQTT 心跳修复 | **已完成(2026-08-13,P0)**:空闲期不再周期性断连 |
 | 🟡 中 | `/api/devices/:id` 单设备详情 | 验收标准第 2 条,简单补 |
 | 🟡 中 | WebSocket /ws | 实时推送(替代轮询);消息格式见协议定稿 |
 | 🟢 低 | feature/device 开 PR 合 main | 阶段四落袋 |
+
+> P0(2026-08-13)已完成:6 个提交已 push;板上部署验证通过(含 MQTT 心跳修复)。
 
 **⏳ 待定义:规则引擎的 id → MQTT 字段路径映射(写规则引擎前必做)**
 - 现状:两套标识并存——注册表 id(`temp_1`/`led_1`...)vs MQTT 字段(`$.body.data.temp`/`body.led_on`)
