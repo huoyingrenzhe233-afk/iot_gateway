@@ -573,7 +573,7 @@ on_message(事件循环线程) → storage.enqueue_telemetry(payload)  只 push 
 
 **遗留(设计取舍,非 bug)**:telemetry 表无限增长(用户要求"无限存",板子 flash 有限,长期运行磁盘会满,答辩时提一句即可)。
 
-### ✅ 2026-08-14 稳定性与双端专项修复轮(分支 fix/stability-review,本机 x86 构建 + API 冒烟 + WS 实测全过)
+### ✅ 2026-08-14 稳定性与双端专项修复轮(分支 fix/stability-review,x86 + ARM 双构建,已部署上板真机验证)
 
 > 范围:上轮审查报告《代码审查报告-稳定性与双端专项.md》的落地修复。9 个文件 + 文档。
 
@@ -601,7 +601,15 @@ on_message(事件循环线程) → storage.enqueue_telemetry(payload)  只 push 
 | L3 | sqlite_store.cpp | sqlite 错误码全忽略,磁盘满静默丢数据 | INSERT/COMMIT 失败记日志 |
 | L4 | main.cpp | 每个 HTTP 短连接关闭都刷一条 ws disconnected 日志 | 只在真从 WS 列表移除时打日志 |
 
-**验证**:x86(WSL g++ 9.4)构建通过;API 冒烟全过(health/status 带 transport/字符串 value 400/别名路由命中/snapshots 404 与穿越拦截/通道切换 503/WS 101 + 收到 channel 广播/SIGTERM 优雅退出日志完整)。
+**验证**:x86(WSL g++ 9.4)+ ARM(Linaro 6.3.1)双构建通过;x86 API 冒烟全过;✅ **已上板(10.137.31.9)真机验证(2026-08-14)**:
+- 新二进制部署后 Qt 端(VNC 5900)无缝恢复 1s 轮询 /api/status(三次重启网关均自动恢复);
+- 真摄像头链:mjpg_streamer 推流 → 抓拍(响应 0.10s,毫秒文件名)→ 新 /snapshots 路由取回完整照片 → ffmpeg 录像 2.3MB AVI → 停止全部零阻塞(0.06~0.11s);未推流时 start_record 正确拒绝 500;
+- 规则引擎真 broker 联测:模拟 temp=35 → 自动下发 buzzer:1 + led_on:0(两条规则),temp=28 → buzzer:0,cmd topic 实捕全对;
+- 控制链:单执行器 200、部分字段 led_br=30 正确下发、字符串 value → 400;
+- H4 断链测试:kill mosquitto 后 /api/control 与单执行器均 503 且**缓存未被假更新**,mosquitto 重启后网关 5s 自动重连、命令 200、缓存正确;
+- WS 双端推送:客户端收到 mqtt_msg 实时广播 ×2 + channel 通道广播 ×2,全部正确;
+- M7:SIGTERM 优雅退出日志完整(gateway stopped/storage: closed),重启健康;
+- ⚠️ 板上单片机(ESP8266)在测试期间 WiFi 掉线未恢复(10:03 起停报),与网关无关——网关侧用 mosquitto_pub 模拟上报完成全链路验证。
 
 **未修(记录备查,下轮再议)**:M3 pid 复用误杀(需 /proc starttime 防御)、L2 日志轮转、D1/D2 双端控制仲裁(协议约定层面,网关无法单独解决)。
 
