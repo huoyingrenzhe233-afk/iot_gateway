@@ -17,6 +17,7 @@
 #include "core/storage/sqlite_store.h"   // 遥测持久化(队列+写线程)
 #include "core/channel/zigbee_adapter.h"  // ZigBee 通道(DL-30 无线串口透传)
 #include "core/channel/channel_manager.h" // 通道管理(MQTT/ZigBee 运行时切换)
+#include <csignal>   // sigaction:SIGTERM/SIGINT 优雅退出(M7 修复)
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -142,6 +143,18 @@ static void reap_children(void *arg)
 static std::vector<struct mg_connection *> g_ws_clients;
 
 // ------------------------------------------------------------
+// 优雅退出标志(M7 修复):SIGTERM/SIGINT 处理器只置这个标志,
+// 事件循环看到后退出并在主线程做收尾(flush 落库/关串口)。
+// signal handler 里禁止 IO/join/锁,所以只置 sig_atomic_t。
+// ------------------------------------------------------------
+static volatile sig_atomic_t g_stop = 0;
+static void on_signal(int sig)
+{
+  (void)sig; // 只关心"有信号",具体是哪个不影响收尾流程
+  g_stop = 1;
+}
+
+// ------------------------------------------------------------
 // ws_send_text:向单个 WebSocket 连接发一条文本消息
 // ------------------------------------------------------------
 static void ws_send_text(struct mg_connection *c, const std::string &s)
@@ -227,16 +240,17 @@ static void request_handler(struct mg_connection *connect, int event,
   }
   if (event == MG_EV_CLOSE)
   {
-    // 连接关闭:从广播列表移除(HTTP 短连接也会走这里,不在列表里就跳过)
+    // 连接关闭:从广播列表移除(HTTP 短连接也会走这里,不在列表里就静默跳过;
+    // 日志只在真移除时打,否则每个 HTTP 请求结束都刷一条误导性的 ws 日志)
     for (size_t i = 0; i < g_ws_clients.size(); i++)
     {
       if (g_ws_clients[i] == connect)
       {
         g_ws_clients.erase(g_ws_clients.begin() + i);
+        LOG_INFO("ws client disconnected (total %zu)", g_ws_clients.size());
         break;
       }
     }
-    LOG_INFO("ws client disconnected (total %zu)", g_ws_clients.size());
     return;
   }
 
@@ -318,26 +332,35 @@ static void request_handler(struct mg_connection *connect, int event,
 
     // POST /api/actuators/<id>/set → 单执行器下发
     // body {"value":1};id → 主命令字段 → 组信封 → 发布 + 缓存同步
-    // 状态码:200 成功 / 404 未知执行器 / 400 缺 value / 503 MQTT 未连接
+    // 状态码:200 成功 / 404 未知执行器 / 400 缺 value 或非数字 / 503 通道未就绪
     else if (mg_match(hm->method, mg_str("POST"), NULL) &&
              extract_actuator_id(hm, actuator_id_str))
     {
       const char *field = actuator_primary_field(actuator_id_str);
+      struct mg_str req_body = mg_str_n(hm->body.buf, hm->body.len);
       if (field == nullptr)
       {
         mg_http_reply(connect, 404, "Content-Type: application/json\r\n",
                       "{\"error\":\"actuator_not_found\"}");
       }
-      else if (mg_json_get_tok(mg_str_n(hm->body.buf, hm->body.len), "$.value")
-                   .len == 0)
+      else if (mg_json_get_tok(req_body, "$.value").len == 0)
       {
         mg_http_reply(connect, 400, "Content-Type: application/json\r\n",
                       "{\"error\":\"missing value\"}");
       }
       else
       {
-        long value = mg_json_get_long(mg_str_n(hm->body.buf, hm->body.len),
-                                      "$.value", 0);
+        // value 必须是数字(4.3 修复):mg_json_get_long 对字符串 token
+        // 返回默认值 0 —— 之前 {"value":"1"} 会被静默解析成 0 下发"关",
+        // Qt 端把文本框内容直接塞进 JSON 时极易触发。现在明确拒绝。
+        double dv = 0;
+        if (!mg_json_get_num(req_body, "$.value", &dv))
+        {
+          mg_http_reply(connect, 400, "Content-Type: application/json\r\n",
+                        "{\"error\":\"invalid value\"}");
+          return;
+        }
+        long value = static_cast<long>(dv);
         std::string envelope = Control::build_field_envelope(
             ctx->config.device_id, field, value);
         // 按当前通道下发(MQTT publish 或 ZigBee 串口 send);返回 false = 当前通道未就绪
@@ -414,6 +437,13 @@ static void request_handler(struct mg_connection *connect, int event,
         }
         else
         {
+          // 切换成功:广播给所有 WS 客户端(4.2-③ 修复)——另一端的通道
+          // 按钮此前只在页面加载时查一次 /api/channel,不广播的话 Web 和
+          // Qt 会长期显示旧通道,再点一下又切回去,来回拉扯。
+          std::string notify = "{\"type\":\"channel\",\"transport\":\"";
+          notify += ts;
+          notify += "\"}";
+          ws_broadcast(notify);
           mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
                         "{\"ok\":true,\"transport\":\"%s\"}", ts.c_str());
         }
@@ -427,6 +457,17 @@ static void request_handler(struct mg_connection *connect, int event,
       if (ctx->device != nullptr)
       {
         std::string status = ctx->device->get_status_json();
+        // 附带当前通道(4.2-③ 修复):只轮询 /api/status 的 Qt 端也能同步
+        // 通道切换,不必额外调 /api/channel。新增字段对老客户端无破坏。
+        Transport t = (ctx->channel != nullptr) ? ctx->channel->current()
+                                                : Transport::MQTT;
+        if (!status.empty() && status.back() == '}')
+        {
+          status.pop_back(); // 去掉结尾的 },插入 transport 字段后补回
+        }
+        status += ",\"transport\":\"";
+        status += (t == Transport::ZIGBEE) ? "zigbee" : "mqtt";
+        status += "\"}";
         mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
                       "%s", status.c_str());
       }
@@ -582,7 +623,9 @@ static void request_handler(struct mg_connection *connect, int event,
     // 方法同时接受 GET 和 POST:前端用 GET 直连,部分客户端用 POST,两种都认
 
     // GET/POST /api/camera/start_stream → 启动推流(fork mjpg_streamer)
-    else if (mg_match(hm->uri, mg_str("/api/camera/start_stream"), NULL) &&
+    // 别名 /api/camera/start:兼容老师 project-plan.md 的命名(4.2-⑤)
+    else if ((mg_match(hm->uri, mg_str("/api/camera/start_stream"), NULL) ||
+              mg_match(hm->uri, mg_str("/api/camera/start"), NULL)) &&
              (mg_match(hm->method, mg_str("GET"), NULL) ||
               mg_match(hm->method, mg_str("POST"), NULL)))
     {
@@ -602,7 +645,9 @@ static void request_handler(struct mg_connection *connect, int event,
     }
 
     // GET/POST /api/camera/stop_stream → 停止推流(kill + waitpid)
-    else if (mg_match(hm->uri, mg_str("/api/camera/stop_stream"), NULL) &&
+    // 别名 /api/camera/stop:兼容老师 project-plan.md 的命名(4.2-⑤)
+    else if ((mg_match(hm->uri, mg_str("/api/camera/stop_stream"), NULL) ||
+              mg_match(hm->uri, mg_str("/api/camera/stop"), NULL)) &&
              (mg_match(hm->method, mg_str("GET"), NULL) ||
               mg_match(hm->method, mg_str("POST"), NULL)))
     {
@@ -621,7 +666,9 @@ static void request_handler(struct mg_connection *connect, int event,
     }
 
     // GET/POST /api/camera/start_record → 开始录像(fork ffmpeg -c copy)
-    else if (mg_match(hm->uri, mg_str("/api/camera/start_record"), NULL) &&
+    // 别名 /api/camera/record/start:兼容老师 project-plan.md 的命名(4.2-⑤)
+    else if ((mg_match(hm->uri, mg_str("/api/camera/start_record"), NULL) ||
+              mg_match(hm->uri, mg_str("/api/camera/record/start"), NULL)) &&
              (mg_match(hm->method, mg_str("GET"), NULL) ||
               mg_match(hm->method, mg_str("POST"), NULL)))
     {
@@ -640,7 +687,9 @@ static void request_handler(struct mg_connection *connect, int event,
     }
 
     // GET/POST /api/camera/stop_record → 停止录像(和 stop_stream 对称)
-    else if (mg_match(hm->uri, mg_str("/api/camera/stop_record"), NULL) &&
+    // 别名 /api/camera/record/stop:兼容老师 project-plan.md 的命名(4.2-⑤)
+    else if ((mg_match(hm->uri, mg_str("/api/camera/stop_record"), NULL) ||
+              mg_match(hm->uri, mg_str("/api/camera/record/stop"), NULL)) &&
              (mg_match(hm->method, mg_str("GET"), NULL) ||
               mg_match(hm->method, mg_str("POST"), NULL)))
     {
@@ -723,6 +772,44 @@ static void request_handler(struct mg_connection *connect, int event,
       mg_ws_upgrade(connect, hm, NULL);
     }
 
+    // GET /snapshots/<文件名> → 伺服抓拍照片(4.2-④ 修复)
+    // 前端拿到 /api/camera/snapshot 返回的 filename 后,拼
+    // http://<host>:8081/snapshots/<filename> 即可 <img> 展示。
+    // 严格校验:只接受 snapshot_ 前缀 + 单路径段(不含 '/')+ .jpg 结尾,
+    // 防止路径穿越;文件不存在由 mg_http_serve_file 回 404。
+    // ⚠️ 本分支必须排在 /ws 之后,否则会吞掉 GET /ws 的升级请求。
+    else if (mg_match(hm->method, mg_str("GET"), NULL))
+    {
+      std::string snap_uri(hm->uri.buf, hm->uri.len);
+      const std::string snap_dir = "/snapshots/";
+      if (snap_uri.compare(0, snap_dir.size(), snap_dir) == 0)
+      {
+        std::string fname = snap_uri.substr(snap_dir.size());
+        const std::string snap_prefix = "snapshot_";
+        bool snap_ok =
+            fname.size() > snap_prefix.size() + 4 && // 至少 "x.jpg"
+            fname.compare(0, snap_prefix.size(), snap_prefix) == 0 &&
+            fname.find('/') == std::string::npos &&
+            fname.size() >= 4 &&
+            fname.compare(fname.size() - 4, 4, ".jpg") == 0;
+        if (snap_ok)
+        {
+          struct mg_http_serve_opts opts = {};
+          opts.root_dir = "snapshots"; // mime 由扩展名推断(image/jpeg)
+          std::string path = "snapshots/" + fname;
+          mg_http_serve_file(connect, hm, path.c_str(), &opts);
+        }
+        else
+        {
+          mg_http_reply(connect, 404, "", "NOT_FOUND");
+        }
+      }
+      else
+      {
+        mg_http_reply(connect, 404, "", "NOT_FOUND");
+      }
+    }
+
     // 其他一切路径 → 404
     else
     {
@@ -733,7 +820,7 @@ static void request_handler(struct mg_connection *connect, int event,
 }
 
 // ------------------------------------------------------------
-// 主函数:初始化 → 启动服务 → 进入事件循环(永不退出)
+// 主函数:初始化 → 启动服务 → 进入事件循环(SIGTERM/SIGINT 优雅退出)
 // ------------------------------------------------------------
 int main(int argc, char *argv[])
 {
@@ -743,6 +830,13 @@ int main(int argc, char *argv[])
   gateway::Logger::instance().init("gateway.log",
                                    log_level_from_string(config.log_level));
   LOG_INFO("gateway starting");
+
+  // 2.5 注册信号处理器(M7 修复):SIGTERM/SIGINT → 置 g_stop 优雅退出
+  // (部署脚本 pkill -x gateway 默认发 SIGTERM,收尾流程见 main 末尾)
+  struct sigaction sa = {};
+  sa.sa_handler = on_signal;
+  sigaction(SIGTERM, &sa, nullptr);
+  sigaction(SIGINT, &sa, nullptr);
 
   // 3. 监听端口:优先取命令行 argv[1],否则用配置的 server.port
   //    (板上 8080 被 mjpg_streamer 摄像头占用,所以部署时传 8081)
@@ -811,7 +905,7 @@ int main(int argc, char *argv[])
   // 7. 注册收到上报的回调(单片机发 sensor/status 时会触发)
   //    统一的消息处理链(MQTT 回调和 ZigBee 串口读共用):
   //    → 更新设备状态缓存(/api/status 读的就是它)
-  //    [&] 安全:main 永不返回,捕获的 static 局部量生命周期覆盖整个事件循环
+  //    [&] 安全:捕获的引用全部指向 static 局部量(g_device 等),生命周期覆盖整个进程
   auto handle_incoming = [&](const std::string &topic, const std::string &payload) {
     LOG_INFO("incoming[%s]: %s", topic.c_str(), payload.c_str());
     g_device.update_from_report(payload);
@@ -834,11 +928,20 @@ int main(int argc, char *argv[])
   g_zigbee.on_message = handle_incoming;
   // 7.5 规则动作回调:规则触发 → 发布命令到单片机 + 同步状态缓存
   //     和 /api/control 同款逻辑(发布 + update_from_control 两步)
-  //     main 永不返回、事件循环单线程,[&] 捕获的引用生命周期足够安全
+  //     [&] 捕获的引用指向 static 局部量,生命周期覆盖整个进程;事件循环单线程
   g_rules.on_action = [&](const std::string &envelope) {
     // 规则触发:按当前通道下发到单片机 + 同步状态缓存(和 /api/control 同款逻辑)
     LOG_INFO("rule action: %s", envelope.c_str());
-    g_channel.send_to_mcu(envelope);
+    // H4 修复:必须检查下发结果。MQTT 掉线/zigbee 未插时命令根本到不了
+    // 单片机,若仍无条件 update_from_control,/api/status 会显示"蜂鸣器已响"
+    // 的假状态,Web/Qt 双端都被骗。与 /api/control、/api/actuators/:id/set
+    // 两条路径保持一致:没发出去就不改缓存。
+    bool sent = g_channel.send_to_mcu(envelope);
+    if (!sent)
+    {
+      LOG_WARN("rule action dropped: channel not ready");
+      return;
+    }
     g_device.update_from_control(envelope);
   };
   // 8. 启动 HTTP 服务,把 ctx 通过 fn_data 传给回调
@@ -852,13 +955,35 @@ int main(int argc, char *argv[])
   ctx.camera = &g_camera;
   ctx.storage = &g_storage;
   ctx.channel = &g_channel;
-  mg_http_listen(&mgr, listen_addr, request_handler, &ctx);
+  // M5 修复:监听失败必须显式退出。此前返回值被丢弃——端口被占
+  // (如板上 8080 被 mjpg_streamer 占用又忘传 8081)时,网关会"正常"进入
+  // 事件循环但没有任何 HTTP 服务,排障极其迷惑。
+  struct mg_connection *http_listener =
+      mg_http_listen(&mgr, listen_addr, request_handler, &ctx);
+  if (http_listener == nullptr)
+  {
+    LOG_ERROR("http listen failed on %s (port in use?)", listen_addr);
+    g_storage.shutdown();
+    g_zigbee.stop();
+    mg_mgr_free(&mgr);
+    return 1;
+  }
   LOG_INFO("http server listening on :%d", port);
 
-  // 9. 事件循环:轮询所有连接,分发事件到回调(单线程,永不返回)
-  for (;;)
+  // 9. 事件循环:轮询所有连接,分发事件到回调(单线程)
+  //    M7 修复:SIGTERM/SIGINT 置 g_stop 后退出循环并优雅收尾
+  //    (部署脚本 pkill -x gateway 默认发 SIGTERM;此前无 handler,
+  //    进程立即死亡,遥测队列最后 ≤1s 数据丢失)。
+  for (; g_stop == 0;)
   {
     mg_mgr_poll(&mgr, 1000); // 每 1000ms 处理一轮:HTTP/MQTT/定时器
   }
-  return 0; // 不可达
+
+  // 10. 优雅收尾:flush 遥测队列 + 关串口 + 释放连接
+  LOG_INFO("gateway stopping");
+  g_zigbee.stop();
+  g_storage.shutdown();
+  mg_mgr_free(&mgr);
+  LOG_INFO("gateway stopped");
+  return 0;
 }

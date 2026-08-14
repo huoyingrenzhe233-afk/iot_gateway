@@ -12,7 +12,9 @@ set -e
 cd "$(dirname "$0")"
 
 TC_FILE="$PWD/cmake/toolchain-linaro.cmake"
-BOARD_IP=192.168.5.70
+# 板上 IP 经常变(有线 192.168.5.70 / WiFi 10.137.31.9),支持环境变量覆盖:
+#   BOARD_IP=10.137.31.9 ./build-arm.sh --deploy
+BOARD_IP="${BOARD_IP:-192.168.5.70}"
 PORT=8081
 
 echo "==> [1/4] 配置交叉编译(build-arm)"

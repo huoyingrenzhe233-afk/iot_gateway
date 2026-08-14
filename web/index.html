@@ -638,10 +638,14 @@ function setMotorDirUser(dir) {
                 irBox.style.color = irDetected ? "var(--danger)" : "var(--success)";
 
                 // 同步硬件状态到前端控件
+                // 滑杆回写前检查焦点:用户正在拖动时跳过,否则一次带旧值的
+                // 轮询返回会把滑杆"拽回去"(本地操作 vs 轮询竞态)
+                const ledBrEl = document.getElementById('led_br');
+                const motorSpEl = document.getElementById('motor_sp');
                 document.getElementById('led_sw').checked = data.led_on === 1;
-                document.getElementById('led_br').value = data.led_br ?? 50;
+                if (document.activeElement !== ledBrEl) ledBrEl.value = data.led_br ?? 50;
                 document.getElementById('motor_sw').checked = data.motor_on === 1;
-                document.getElementById('motor_sp').value = data.motor_sp ?? 30;
+                if (document.activeElement !== motorSpEl) motorSpEl.value = data.motor_sp ?? 30;
                 setMotorDirUI(data.motor_dir);
                 document.getElementById('buzzer_sw').checked = data.buzzer === 1;
 
@@ -668,6 +672,10 @@ function setMotorDirUser(dir) {
                     const msg = JSON.parse(ev.data);
                     if (msg.type === 'mqtt_msg') {
                         addLog(`📡 MQTT ${msg.topic}: ${msg.payload}`);
+                    } else if (msg.type === 'channel' &&
+                               (msg.transport === 'mqtt' || msg.transport === 'zigbee')) {
+                        // 别端(或本端)切换了通道:按钮立即同步,不再只靠页面加载时查一次
+                        updateChannelBtn(msg.transport);
                     }
                 } catch (e) {
                     // 非 JSON 消息忽略

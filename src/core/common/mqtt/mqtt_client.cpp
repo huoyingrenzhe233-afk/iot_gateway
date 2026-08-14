@@ -149,6 +149,15 @@ namespace gateway
     }
     else if (ev == MG_EV_CLOSE)
     {
+      // 只认"当前连接"的关闭事件(M4 加固):connect() 防重入分支会先把
+      // 旧连接标记关闭并立即建立新连接,旧连接的 CLOSE 事件随后才到——
+      // 若不判断 c == conn,旧连接的迟到 CLOSE 会把正在工作的新连接
+      // 状态误清空,造成 5 秒窗口内命令被 503、且多拉起一条连接。
+      if (c != conn)
+      {
+        LOG_WARN("mqtt stale connection closed (ignored)");
+        return;
+      }
       LOG_WARN("mqtt disconnected");
       subscribed_ = false;
       conn = nullptr;

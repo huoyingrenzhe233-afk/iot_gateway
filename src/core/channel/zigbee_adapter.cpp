@@ -112,8 +112,12 @@ bool ZigbeeAdapter::send(const std::string &msg) {
     ssize_t n = write(fd_, frame.data() + off, frame.size() - off);
     if (n < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        // 缓冲满:等最多 50ms 可写再试;超过 100 次(约 5s)放弃,防死循环卡死事件循环
-        if (++eagain > 100) {
+        // 缓冲满:等最多 50ms 可写再试。重试上限 4 次(≤200ms 硬上限,
+        // H3 修复):send 在事件循环线程执行,原 100 次(约 5s)会把
+        // HTTP/MQTT/WS 全部冻住 5 秒。正常工况(115200 波特率 + 单条
+        // 命令几百字节)几乎不可能连续 4 次 EAGAIN;真出现 = 对端
+        // (DL-30/单片机)已失联,快速失败让调用方回 503 才是正确行为。
+        if (++eagain > 4) {
           LOG_ERROR("zigbee: send failed (tx buffer full, giving up)");
           return false;
         }
@@ -154,6 +158,7 @@ void ZigbeeAdapter::poll_serial() {
   for (;;) {
     ssize_t n = read(fd_, buf, sizeof(buf));
     if (n > 0) {
+      read_fail_count_ = 0; // 读到数据,失败计数归零
       buffer_.append(buf, static_cast<size_t>(n));
       // 防御:buffer_ 无界增长保护(正常一条消息几百字节)
       // 超 64KB 说明对端在发无 \n 的垃圾数据,清空防止内存膨胀
@@ -166,8 +171,15 @@ void ZigbeeAdapter::poll_serial() {
     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
       break; // 非阻塞读没数据了:正常退出
     }
-    // 真错误(如模块拔掉)或 EOF:退出,下轮再试
-    if (n < 0) LOG_WARN("zigbee: read failed: %s", strerror(errno));
+    // 真错误(如模块拔掉)或 EOF:日志节流(M6 修复)。
+    // 不节流的话每 50ms 打一条 = 一天 170 万行,迅速写满 flash。
+    // 前 3 次每次都打(便于及时发现问题),之后每 20 次打一条。
+    if (n < 0) {
+      if (++read_fail_count_ <= 3 || read_fail_count_ % 20 == 0) {
+        LOG_WARN("zigbee: read failed (%d times): %s", read_fail_count_,
+                 strerror(errno));
+      }
+    }
     break;
   }
   // ---- 按 '\n' 分帧:完整行 = 一条消息,残留尾巴留到下轮 ----

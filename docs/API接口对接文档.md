@@ -125,19 +125,22 @@
 ```
 id 不存在 → 404 {"error":"actuator_not_found"}
 请求体缺 value → 400 {"error":"missing value"}
+value 不是数字(如字符串 "1") → 400 {"error":"invalid value"}
 当前通道未就绪(MQTT 掉线 / zigbee 未插) → 503 {"ok":false}
 ```
+
+⚠️ **`value` 必须是 JSON 数字**(如 `{"value":1}`)。传字符串 `{"value":"1"}` 会被拒绝(400),不会执行任何动作——Qt 从文本框取值时注意 `toInt()` 后再塞进 JSON。
 
 ⚠️ **注意**:`led_1` 只能开关(`led_on`),不能通过此接口调亮度(`led_br`);调亮度要用 4.4 的 `/api/status` 全字段接口 `/api/control`。
 
 ### 4.4 `GET /api/status` — 设备状态聚合(轮询核心接口)
 
-返回 10 个字段:4 传感器测量值(字符串)+ 6 执行器状态(数值)。**前端/Qt 每 1 秒轮询这个接口刷新界面**。
+返回 10 个字段:4 传感器测量值(字符串)+ 6 执行器状态(数值),外加 1 个 `transport` 通道字段。**前端/Qt 每 1 秒轮询这个接口刷新界面**。
 
 ```
 请求: GET http://192.168.5.70:8081/api/status
 响应 200:
-{"temp":"25.5","humi":"60.1","light":"320","ir":"2500","led_on":1,"led_br":80,"motor_on":0,"motor_sp":0,"motor_dir":0,"buzzer":0}
+{"temp":"25.5","humi":"60.1","light":"320","ir":"2500","led_on":1,"led_br":80,"motor_on":0,"motor_sp":0,"motor_dir":0,"buzzer":0,"transport":"mqtt"}
 ```
 
 字段说明:
@@ -148,6 +151,7 @@ id 不存在 → 404 {"error":"actuator_not_found"}
 | `led_br` `motor_sp` | int | 0-100 PWM |
 | `motor_on` | int | 0/1 |
 | `motor_dir` | int | 0 正转 / 1 反转 |
+| `transport` | string | 当前通信通道(`mqtt`/`zigbee`),Qt 界面切换按钮状态可直接读它 |
 
 未收到过上报时,传感器字段为空字符串 `""`。
 
@@ -241,19 +245,23 @@ body["payload"] = payload;
 
 | 接口 | 方法 | 说明 | 响应 |
 |---|---|---|---|
-| `/api/camera/start_stream` | GET/POST | 启动推流 | 200 `{"ok":true}` / 500 |
-| `/api/camera/stop_stream` | GET/POST | 停止推流 | 200 `{"ok":true}` |
-| `/api/camera/start_record` | GET/POST | 开始录像 | 200 `{"ok":true}` |
-| `/api/camera/stop_record` | GET/POST | 停止录像 | 200 `{"ok":true}` |
+| `/api/camera/start_stream`(别名 `/api/camera/start`) | GET/POST | 启动推流 | 200 `{"ok":true}` / 500 |
+| `/api/camera/stop_stream`(别名 `/api/camera/stop`) | GET/POST | 停止推流 | 200 `{"ok":true}` |
+| `/api/camera/start_record`(别名 `/api/camera/record/start`) | GET/POST | 开始录像(需先推流) | 200 `{"ok":true}` / 500 |
+| `/api/camera/stop_record`(别名 `/api/camera/record/stop`) | GET/POST | 停止录像 | 200 `{"ok":true}` |
 | `/api/camera/snapshot` | GET/POST | 抓拍一帧 | 200 `{"ok":true,"filename":"snapshot_xxx.jpg"}` |
 | `/api/camera/status` | GET/POST | 状态查询 | `{"running":false,"recording":false}` |
+
+> 别名路由是为兼容老师 project-plan.md 里的接口名(`start/stop`、`record/start|stop`),两套名字行为完全一致,Qt 端用哪套都行。
+
+**抓拍照片取回**:`snapshot` 返回的 `filename` 拼 `http://192.168.5.70:8081/snapshots/<filename>` 即可用 `<img>` 直接展示(网关已提供该静态路由)。
+
+**录像顺序**:先 `start_stream`(推流),再 `start_record`(录像);录像保存到网关 `records/` 目录。未推流时调 `start_record` 会被拒绝(500)。
 
 **视频流地址**(推流启动后,前端 `<img>` 直接显示):
 ```
 http://192.168.5.70:8080/?action=stream
 ```
-
-**录像顺序**:先 `start_stream`(推流),再 `start_record`(录像);录像保存到网关 `records/` 目录。
 
 ---
 
@@ -320,6 +328,16 @@ http://192.168.5.70:8080/?action=stream
 ```json
 {"type":"mqtt_msg","topic":"dev/mcu01/report","payload":"{\"type\":\"sensor\",...}"}
 ```
+
+### 服务端 → 客户端(通道切换时广播,双端按钮同步)
+
+任意一端(Web/Qt)切换通道成功后,网关广播给所有 WS 客户端:
+
+```json
+{"type":"channel","transport":"zigbee"}
+```
+
+Qt 收到后立即更新界面上的通道按钮状态,不用等轮询。
 
 ### 客户端 → 服务端(模拟 MQTT 发布)
 
