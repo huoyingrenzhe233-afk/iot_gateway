@@ -1,5 +1,6 @@
 #include "widget.h"
 #include "gatewayclient.h"
+#include "wsclient.h"
 
 #include <QCheckBox>
 #include <QHBoxLayout>
@@ -11,6 +12,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QTime>
 #include <QTimer>
@@ -27,6 +29,7 @@ const QString buttonStyle = QStringLiteral(
 Widget::Widget(const QString &host, QWidget *parent)
     : QWidget(parent),
       client_(new GatewayClient(host, this)),
+      wsClient_(new WsClient(host, this)),
       streamReply_(nullptr),
       viewing_(false),
       recording_(false),
@@ -213,6 +216,15 @@ Widget::Widget(const QString &host, QWidget *parent)
         recordButton_->setText(recording ? QStringLiteral("⏹ 停止录制") : QStringLiteral("🔴 视频录制"));
         if (running) appendLog(QStringLiteral("📹 视频流已就绪，点开始视频观看"));
     });
+    connect(wsClient_, &WsClient::mqttMessage, this, [this](const QString &topic, const QString &payload) {
+        appendLog(QStringLiteral("📡 MQTT %1: %2").arg(topic, payload));
+    });
+    connect(wsClient_, &WsClient::channelChanged, this, [this](const QString &transport) {
+        channelButton_->setText(transport == QStringLiteral("zigbee")
+                                    ? QStringLiteral("📡 通道:ZigBee")
+                                    : QStringLiteral("📡 通道:MQTT"));
+    });
+    connect(wsClient_, &WsClient::logMessage, this, &Widget::appendLog);
     connect(client_, &GatewayClient::streamReady, this, [this, host]() {
         QTimer::singleShot(1500, this, [this, host]() {
             auto *manager = new QNetworkAccessManager(this);
@@ -223,6 +235,7 @@ Widget::Widget(const QString &host, QWidget *parent)
     });
     appendLog(QStringLiteral("[系统] 页面加载完成，设备控制就绪"));
     client_->start();
+    wsClient_->start();
 }
 
 Widget::~Widget()
@@ -309,6 +322,11 @@ void Widget::sendControl()
 
 void Widget::updateStatus(const QJsonObject &status)
 {
+    const QSignalBlocker ledBlocker(ledSwitch_);
+    const QSignalBlocker motorBlocker(motorSwitch_);
+    const QSignalBlocker buzzerBlocker(buzzerSwitch_);
+    const QSignalBlocker ledBrightnessBlocker(ledBrightness_);
+    const QSignalBlocker motorSpeedBlocker(motorSpeed_);
     const auto sensor = [&status](const char *key) {
         const QString value = status.value(QString::fromLatin1(key)).toString();
         return value.isEmpty() ? QStringLiteral("--") : value;
