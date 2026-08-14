@@ -19,11 +19,13 @@ DEFINES += QT_DEPRECATED_WARNINGS
 SOURCES += \
     main.cpp \
     widget.cpp \
-    gatewayclient.cpp
+    gatewayclient.cpp \
+    wsclient.cpp
 
 HEADERS += \
     widget.h \
-    gatewayclient.h
+    gatewayclient.h \
+    wsclient.h
 
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin

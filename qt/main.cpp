@@ -11,6 +11,6 @@ int main(int argc, char *argv[])
     parser.addPositionalArgument("host", "Gateway host", "host");
     parser.process(a);
     Widget w(parser.positionalArguments().value(0, "127.0.0.1"));
-    w.show();
+    w.showFullScreen();
     return a.exec();
 }

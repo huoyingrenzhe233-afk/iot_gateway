@@ -12,6 +12,7 @@ class QPlainTextEdit;
 class QPushButton;
 class QSlider;
 class GatewayClient;
+class WsClient;
 
 class Widget : public QWidget
 {
@@ -35,6 +36,7 @@ private:
     void renderNextFrame();
 
     GatewayClient *client_;
+    WsClient *wsClient_;
     QNetworkReply *streamReply_;
     QByteArray streamBuffer_;
     bool viewing_;
