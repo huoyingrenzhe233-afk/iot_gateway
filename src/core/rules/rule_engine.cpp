@@ -103,13 +103,6 @@ namespace gateway {
                 r.actuator_id = item["then"]["actuator"].as<std::string>("");
                 r.field = item["then"]["field"].as<std::string>("");
                 r.value = item["then"]["value"].as<long>(0);
-                // 可选冷却时间(秒):fire 后 N 秒内规则休眠,防阈值附近抖动
-                // 导致的快速来回下发。0 = 禁用(默认)。
-                r.cooldown_sec = item["cooldown"].as<int>(0);
-                if (r.cooldown_sec < 0)
-                {
-                    r.cooldown_sec = 0;
-                }
 
                 // ① id:非空(空 id 无法被 API 引用)
                 if (r.id.empty())
@@ -288,17 +281,6 @@ namespace gateway {
             {
                 continue; // 已停用规则直接跳过
             }
-            // 冷却时间:fire 后 cooldown_sec 秒内整条规则休眠(不评估、
-            // 不更新沿状态)。防读数在阈值附近抖动/物理反馈导致的快速
-            // 来回下发(如暗光开灯 → LED 漏光抬升读数 → 亮光关灯 → 循环)。
-            if (r.cooldown_sec > 0 && r.last_fire_ms != 0)
-            {
-                unsigned long elapsed_ms = mg_millis() - r.last_fire_ms;
-                if (elapsed_ms < (unsigned long)r.cooldown_sec * 1000UL)
-                {
-                    continue;
-                }
-            }
             const auto &sp = sensor_paths();
             auto it = sp.find(r.sensor_id);
             if (it == sp.end())
@@ -318,7 +300,6 @@ namespace gateway {
                 LOG_INFO("rule '%s' triggered: %s %s %.1f", r.id.c_str(),
                          r.sensor_id.c_str(), r.op.c_str(), r.threshold);
                 fire(r);
-                r.last_fire_ms = mg_millis(); // 冷却计时起点
             }
             r.last_satisfied = satisfied; // 记住本次结果,供下次判断沿
         }
@@ -427,9 +408,7 @@ namespace gateway {
             out += json_escape(r.field);
             out += "\",\"value\":";
             out += std::to_string(r.value);
-            out += "},\"cooldown\":";
-            out += std::to_string(r.cooldown_sec);
-            out += "}";
+            out += "}}";
         }
         out += "]";
         return out;
