@@ -78,8 +78,17 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 - 修复 7 项(S2 0值 / M4 cmd静默 / M6 停流停录像 / M8 IR颜色 / M2 僵尸误报 / M1 waitpid阻塞 / M9 EAGAIN死循环),详见第 5 节"全量代码审查"记录
 - 已部署上板(WiFi `10.137.31.9`);遗留未修:S1 XSS、MCU 固件缺失、Qt 空壳、无鉴权
 
+### ✅ P4 + S1 修复轮 — 完成(2026-08-13,已部署上板)
+- 修复 7 项(S1 XSS / M5 / M7a / M7b / M10 / M11 / M14),审查发现的 14 项 bug 全部闭环
+- 详见第 5 节"P4 + S1 修复轮"记录
+
+### ✅ Qt 端开发 — 完成(2026-08-16,四端齐了)
+- Qt 5.15.2 交叉编译(`/home/kkk/qt-aarch64`)+ Qt 前端程序(`qt/mainwindow.*` 717 行,对照 web)+ 部署 `/root/qtapp/`
+- 端到端验证通过(截图/轮询/VNC 点击控制),详见第 5 节"Qt 端开发"记录
+- 运行:`./run.sh`(VNC 5900)或 `./run.sh linuxfb`(HDMI);启动后网关日志可见 Qt 端每秒轮询
+
 ### ⏳ 未开始
-- (无;feature/device 已合 main)
+- (无;feature/device 已合 main;MCU 固件缺失需单片机同事实现)
 
 ## 3. 环境信息
 
@@ -92,6 +101,7 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 | ✅ **交叉编译工具链(实际使用)** | `/opt/gcc-linaro-6.3.1-2017.05-x86_64_aarch64-linux-gnu`(Linaro 官方版,**干净免环境变量**,sysroot glibc 2.23 兼容板上 2.29) |
 | ❌ 备选工具链 | `buildroot/output/rockchip_rk3568/host/bin/aarch64-...-gcc` 与 `prebuilts/gcc/.../gcc-buildroot-9.3.0-2020.03/`(**需 `export LD_LIBRARY_PATH=$TC/lib`,RPATH 指向构建者机器,已弃用**) |
 | toolchainfile.cmake | ✅ `gateway/cmake/toolchain-linaro.cmake`(已写好,指向 /opt Linaro) |
+| **Qt 交叉环境(2026-08-16 新装)** | ✅ `/home/kkk/qt-aarch64`(自编译 Qt 5.15.2 aarch64:qmake/moc/库/linuxfb+vnc 插件),源码在 buildroot `dl/`;编译 Qt 程序:`PATH=linaro:$PATH` + `/home/kkk/qt-aarch64/bin/qmake` + `make` |
 | 项目仓库 | `/home/kkk/gateway`(git,远端 origin/main) |
 | 摄像头启动 | `mjpg_streamer -b -i "input_uvc.so -d /dev/video9 -r 640x480 -f 15 -q 85" -o "output_http.so -p 8080"` |
 | 摄像头型号 | USB CP-LL21A(识别 0bda:d327),OV5695 是 CSI 不可用 |
@@ -572,6 +582,42 @@ on_message(事件循环线程) → storage.enqueue_telemetry(payload)  只 push 
 **验证**:LSP 0 诊断;x86 + ARM 编译通过;前端 JS `node --check` 通过;部署上板 `/api/health` + `/api/rules`(4 条规则正常加载,移除 `==` 不影响现有规则)通过。
 
 **遗留(设计取舍,非 bug)**:telemetry 表无限增长(用户要求"无限存",板子 flash 有限,长期运行磁盘会满,答辩时提一句即可)。
+
+### ✅ 2026-08-16 Qt 端开发 — 从零到上板(四端齐了)
+
+> 背景:Qt 端是四端唯一缺失环节(`qt/` 只有空壳)。今日完成:Qt 5.15.2 交叉编译 → 前端程序 → 上板端到端验证。
+
+**Qt 交叉编译环境(重要,已就绪)**:
+- Qt 5.15.2 源码:buildroot `dl/qtbase-everywhere-src-5.15.2.tar.xz`(板子 Qt 同源)
+- 手动交叉编译到 **`/home/kkk/qt-aarch64`**(linaro 工具链,configure 选项见下)
+- 关键:宿主机无 Qt 开发环境 + `/opt` 无写权限(sudo 需密码)→ `make install INSTALL_ROOT=` staging + `bin/qt.conf`(Prefix=..) 重定向路径
+- configure 精简选项:`-no-opengl -no-xcb -no-eglfs -no-kms -qt-zlib -qt-libpng -qt-freetype -no-fontconfig`(只编译 core/gui/widgets/network)
+- 产出:qmake/moc/uic + linuxfb/vnc 插件 + libqjpeg(JPEG 显示必需)
+
+**Qt 前端程序(`qt/mainwindow.h/.cpp` 717 行,对照 web 完全一致)**:
+- 布局:header(渐变紫+通道按钮+状态) + 左侧(视频区+4 传感器卡片) + 右侧(控制面板+深色日志)
+- 功能:每秒轮询 /api/status(in-flight 保护)、POST /api/control(6 字段,失败提示)、摄像头 4 操作、MJPEG 流解析(FFD8/FFD9 分帧)、通道切换、日志上限 300 行
+- 移植避坑:滑块用 `sliderReleased`(轮询 setValue 不误发控制)、IR 统一 `Number()>2000`
+- 用法:`./qt_gateway [网关IP] [-screenshot out.png]`(screenshot 供无头验证)
+
+**部署(自包含,板子 `/root/qtapp/`)**:
+- 结构:qt_gateway + lib/(9 个 Qt 库) + plugins/(linuxfb/vnc/jpeg) + run.sh
+- 启动:`./run.sh`(默认 VNC 5900)或 `./run.sh linuxfb`(HDMI 显示器);需 `QT_QPA_FONTDIR=/usr/share/fonts/noto-sans-sc`(中文字体)
+
+**验证(全部通过)**:
+| 项 | 结果 |
+|---|---|
+| offscreen 截图 | ✅ 布局/中文/颜色正常(无 emoji 方框) |
+| 网关日志 | ✅ 每秒 GET /api/status(Qt 端轮询) |
+| VNC 服务 | ✅ 5900 监听,RFB 握手 1280x800 |
+| **端到端点击控制** | ✅ RFB 发鼠标事件点 LED/buzzer checkbox → 网关收到 POST /api/control |
+
+**踩坑记录**:
+- **板子 busybox tar 不支持 `-z`**:tgz 解压报 invalid magic,改 `gunzip -c | tar xf` 两步
+- **板子字体无 emoji**:noto-sans-sc 无 emoji,界面图标(🎥📡)显示方框 → 全改纯文字
+- **Qt VNC 必须收 SetPixelFormat 才正常**:只发 FramebufferUpdateRequest 时 `m_pixelFormat` 未初始化 → `bytesPerPixel` 垃圾值 → `rect.w*bytesPerPixel` int 溢出为负 → `QIODevice::write maxSize<0` + 帧发送失败。真实 VNC 客户端(RealVNC/TigerVNC)都会发 SetPixelFormat,不受影响
+- **控件定位用 `mapTo(window())`**:`geometry()` 是相对父控件坐标,远程点击要窗口坐标
+- **bash 正则批量改字符慎用 `\u1F000`**:python re 解析为 `\u1F00`+`0` 产生错误范围 `0-\u1FAF`,误删大量字符(曾致 mainwindow.cpp 重写)
 
 ### 📡 通信协议定稿(2026-08-11 盘点,唯一权威)
 
