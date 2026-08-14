@@ -31,6 +31,11 @@ namespace gateway {
         std::string field;       // 下发命令字段(如 buzzer)
         long value = 0;          // 下发值
         bool last_satisfied = false; // 上次评估是否满足(仅上升沿触发,不持久化)
+        // 冷却时间(秒,可选,0=禁用):fire 之后 N 秒内整条规则休眠。
+        // 用于防传感器读数在阈值附近抖动/物理反馈(如 LED 的光漏回光敏)
+        // 导致的快速来回下发。配合"开/关两条规则阈值错开(回滞带)"使用。
+        int cooldown_sec = 0;
+        unsigned long last_fire_ms = 0; // 上次 fire 时刻(mg_millis,上电毫秒)
     };
 
     // 规则引擎:加载 → 评估 → 触发动作(发布命令信封)
