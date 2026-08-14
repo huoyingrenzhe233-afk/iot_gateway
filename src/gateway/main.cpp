@@ -361,8 +361,23 @@ static void request_handler(struct mg_connection *connect, int event,
           return;
         }
         long value = static_cast<long>(dv);
-        std::string envelope = Control::build_field_envelope(
-            ctx->config.device_id, field, value);
+        // led_on 命令附带当前亮度:兼容整帧解析型 MCU 固件(只发 led_on
+        // 没有 led_br 时 PWM=0,灯开了看不见)。亮度取缓存,无则默认 50。
+        std::string envelope;
+        if (std::string(field) == "led_on")
+        {
+          int br = (ctx->device != nullptr) ? ctx->device->led_brightness() : 0;
+          if (br <= 0)
+          {
+            br = 50;
+          }
+          envelope = Control::build_led_envelope(ctx->config.device_id, value, br);
+        }
+        else
+        {
+          envelope = Control::build_field_envelope(
+              ctx->config.device_id, field, value);
+        }
         // 按当前通道下发(MQTT publish 或 ZigBee 串口 send);返回 false = 当前通道未就绪
         bool sent = false;
         if (ctx->channel != nullptr)
@@ -952,6 +967,8 @@ int main(int argc, char *argv[])
   // 7.5 规则动作回调:规则触发 → 发布命令到单片机 + 同步状态缓存
   //     和 /api/control 同款逻辑(发布 + update_from_control 两步)
   //     [&] 捕获的引用指向 static 局部量,生命周期覆盖整个进程;事件循环单线程
+  // 规则 led_on 动作的亮度来源:取设备缓存当前亮度(无则 fire 内默认 50)
+  g_rules.current_led_brightness = [&]() { return g_device.led_brightness(); };
   g_rules.on_action = [&](const std::string &envelope) {
     // 规则触发:按当前通道下发到单片机 + 同步状态缓存(和 /api/control 同款逻辑)
     LOG_INFO("rule action: %s", envelope.c_str());

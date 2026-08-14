@@ -23,5 +23,13 @@ namespace gateway
     // 那个从 HTTP body 抠 payload,这个直接指定 field=value)
     static std::string build_field_envelope(const std::string &device_id,
                                             const std::string &field, long value);
+
+    // 组 LED 开关命令信封(带亮度):
+    //   {"type":"cmd","dev":"...","ts":"...","body":{"led_on":X,"led_br":Y}}
+    // 为什么开关要带亮度:部分单片机固件按"整帧"解析,只收到 led_on 而
+    // 没有 led_br 时会把 PWM 置 0(灯开了但亮度 0,看起来没亮)。
+    // 供 /api/actuators/led_1/set 和规则引擎的 led_on 动作使用。
+    static std::string build_led_envelope(const std::string &device_id,
+                                          long on, long brightness);
   };
 } // namespace gateway

@@ -81,4 +81,34 @@ namespace gateway
     envelope += "}}";
     return envelope;
   }
+
+  // ------------------------------------------------------------
+  // build_led_envelope:组 LED 开关命令信封(开关 + 亮度一起发)
+  //   {"type":"cmd","dev":"mcu01","ts":"...","body":{"led_on":1,"led_br":80}}
+  // 背景:协议支持"部分字段下发",但实际 MCU 固件按整帧解析——只收到
+  // led_on 没有 led_br 时 PWM 被置 0,灯"开了但看不见"。所以 LED 的
+  // 开关命令统一附带亮度字段(brightness 取网关缓存的当前亮度)。
+  // ------------------------------------------------------------
+  std::string Control::build_led_envelope(const std::string &device_id,
+                                          long on, long brightness)
+  {
+    char ts[32];
+    std::time_t now = std::time(nullptr);
+    struct tm tm = {};
+    localtime_r(&now, &tm);
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm);
+
+    std::string envelope;
+    envelope.reserve(128);
+    envelope += "{\"type\":\"cmd\",\"dev\":\"";
+    envelope += device_id;
+    envelope += "\",\"ts\":\"";
+    envelope += ts;
+    envelope += "\",\"body\":{\"led_on\":";
+    envelope += std::to_string(on);
+    envelope += ",\"led_br\":";
+    envelope += std::to_string(brightness);
+    envelope += "}}";
+    return envelope;
+  }
 } // namespace gateway
