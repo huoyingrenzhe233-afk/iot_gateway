@@ -30,6 +30,10 @@ public:
   // 下发命令到单片机(按当前通道);无可用通道返回 false
   bool send_to_mcu(const std::string &envelope);
 
+  // 经"指定通道"下发(不理会当前通道):通道切换时用来在旧通道上
+  // 通知单片机切换模块(单片机此刻还挂在旧通道上)。
+  bool send_via(Transport t, const std::string &envelope);
+
 private:
   Transport current_ = Transport::MQTT; // 当前通道(MQTT 默认)
   MqttClient *mqtt_ = nullptr;          // MQTT 通道(可空 = 未绑定)

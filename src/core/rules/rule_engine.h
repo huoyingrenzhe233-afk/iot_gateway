@@ -52,6 +52,10 @@ namespace gateway {
         size_t size() const { return rules_.size(); }
         // 规则触发时的动作回调(由 main.cpp 赋值为:发布命令 + 同步状态缓存)
         std::function<void(const std::string &cmd_envelope)> on_action;
+        // LED 亮度来源(由 main.cpp 赋值):规则动作为 led_on 时,信封附带
+        // 当前缓存亮度(兼容整帧解析型 MCU 固件)。返回 0 表示"未设置",
+        // 由 fire() 落到默认亮度。
+        std::function<int()> current_led_brightness;
     private:
         // 解析 yaml 到 out(不触碰成员状态);成功 true,失败 false 且 out 可能部分填充(由调用方丢弃)
         bool parse(const std::string &rules_path, const DeviceRegistry &registry,

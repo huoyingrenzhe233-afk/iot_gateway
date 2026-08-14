@@ -39,6 +39,7 @@ private:
   struct mg_mgr *mgr_ = nullptr;      // 所属事件循环(停定时器用)
   struct mg_timer *timer_ = nullptr;  // 轮询定时器(50ms)
   std::string buffer_;                // 未分帧的残留字节缓冲
+  int read_fail_count_ = 0;           // 连续读失败计数(日志节流,防拔线后刷屏)
 };
 
 } // namespace gateway

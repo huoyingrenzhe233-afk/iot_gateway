@@ -573,6 +573,56 @@ on_message(事件循环线程) → storage.enqueue_telemetry(payload)  只 push 
 
 **遗留(设计取舍,非 bug)**:telemetry 表无限增长(用户要求"无限存",板子 flash 有限,长期运行磁盘会满,答辩时提一句即可)。
 
+### ✅ 2026-08-14 稳定性与双端专项修复轮(分支 fix/stability-review,x86 + ARM 双构建,已部署上板真机验证)
+
+> 范围:上轮审查报告《代码审查报告-稳定性与双端专项.md》的落地修复。9 个文件 + 文档。
+
+**修复清单(全部已修)**:
+
+| # | 文件 | 问题 | 修复 |
+|---|---|---|---|
+| H1 | camera_manager.cpp | 抓拍 wget 无超时,流卡住时冻结事件循环最长 900s | wget 加 `-T 5` + 网关侧 `wait_exit_ok` 限时 7s 轮询等待 |
+| H2 | camera_manager.cpp | 停流/停录像 SIGKILL 后阻塞 waitpid,子进程 D 状态时永久冻结 | 收尸改限时 1s WNOHANG 轮询,超时放弃交给 reap_children |
+| H3 | zigbee_adapter.cpp | send EAGAIN 重试 100×50ms=5s 阻塞事件循环 | 重试上限压到 4 次(≤200ms),失败快速返回让调用方回 503 |
+| H4 | main.cpp | 规则动作不检查下发结果,命令没发出却改缓存(双端假同步) | on_action 检查 send_to_mcu 返回值,失败不改缓存 |
+| M1 | camera_manager.cpp | 多线程进程 fork 后子进程 malloc 死锁隐患 | argv 数组 + PATH 解析全部挪到 fork 前;子进程只用 async-signal-safe 调用 + execv |
+| M2 | sqlite_store.h/.cpp | enqueue 无锁读 db_;pending_ 队列无上限 | db_ 改 atomic;队列改 deque + 10000 条上限丢最旧 |
+| M4 | mqtt_client.cpp | 旧连接的迟到 CLOSE 会误清新连接状态 | EV_CLOSE 判断 `c == conn`,不匹配忽略 |
+| M5 | main.cpp | mg_http_listen 返回值被丢弃,端口被占时静默无 HTTP | 检查返回值,失败 LOG_ERROR + exit(1) |
+| M6 | zigbee_adapter.cpp | 拔线后 read 失败每 50ms 一条 WARN 刷爆日志 | 失败计数节流(前 3 次 + 每 20 次一条) |
+| M7 | main.cpp | 无信号处理,pkill SIGTERM 直接死亡丢队列 | sigaction 置标志 → 退出循环 → flush 落库 + 关串口 + mg_mgr_free |
+| 4.2-② | camera_manager.cpp | start_record 不校验推流状态,ffmpeg 秒退但 API 报 ok | 前置 stream_running() 校验,未推流拒绝 |
+| 4.2-③ | main.cpp + web/index.html | 通道切换不广播,双端按钮长期失步 | 切换成功 WS 广播 `{"type":"channel",...}`;前端收到即更新按钮;/api/status 附带 transport 字段 |
+| 4.2-④ | main.cpp | snapshots 无静态路由,文档承诺的拼 URL 404 | 新增 GET /snapshots/<文件名> 路由(strict 校验防穿越) |
+| 4.2-⑤ | main.cpp | 摄像头接口名与老师 project-plan.md 不一致 | 加别名路由 `/api/camera/start|stop`、`/api/camera/record/start|stop` |
+| 4.3 | main.cpp | {"value":"1"} 字符串被静默解析成 0 下发"关" | value 强制数字类型,否则 400 invalid value |
+| D4 | camera_manager.cpp | 同 1 秒双端并发抓拍文件名互相覆盖 | 文件名时间戳加毫秒 |
+| L1 | build-arm.sh | BOARD_IP 硬编码旧有线 IP | 支持 BOARD_IP 环境变量覆盖 |
+| L3 | sqlite_store.cpp | sqlite 错误码全忽略,磁盘满静默丢数据 | INSERT/COMMIT 失败记日志 |
+| L4 | main.cpp | 每个 HTTP 短连接关闭都刷一条 ws disconnected 日志 | 只在真从 WS 列表移除时打日志 |
+
+**验证**:x86(WSL g++ 9.4)+ ARM(Linaro 6.3.1)双构建通过;x86 API 冒烟全过;✅ **已上板(10.137.31.9)真机验证(2026-08-14)**:
+- 新二进制部署后 Qt 端(VNC 5900)无缝恢复 1s 轮询 /api/status(三次重启网关均自动恢复);
+- 真摄像头链:mjpg_streamer 推流 → 抓拍(响应 0.10s,毫秒文件名)→ 新 /snapshots 路由取回完整照片 → ffmpeg 录像 2.3MB AVI → 停止全部零阻塞(0.06~0.11s);未推流时 start_record 正确拒绝 500;
+- 规则引擎真 broker 联测:模拟 temp=35 → 自动下发 buzzer:1 + led_on:0(两条规则),temp=28 → buzzer:0,cmd topic 实捕全对;
+- 控制链:单执行器 200、部分字段 led_br=30 正确下发、字符串 value → 400;
+- H4 断链测试:kill mosquitto 后 /api/control 与单执行器均 503 且**缓存未被假更新**,mosquitto 重启后网关 5s 自动重连、命令 200、缓存正确;
+- WS 双端推送:客户端收到 mqtt_msg 实时广播 ×2 + channel 通道广播 ×2,全部正确;
+- M7:SIGTERM 优雅退出日志完整(gateway stopped/storage: closed),重启健康;
+- ⚠️ 板上单片机(ESP8266)在测试期间 WiFi 掉线未恢复(10:03 起停报),与网关无关——网关侧用 mosquitto_pub 模拟上报完成全链路验证。
+
+**未修(记录备查,下轮再议)**:M3 pid 复用误杀(需 /proc starttime 防御)、L2 日志轮转、D1/D2 双端控制仲裁(协议约定层面,网关无法单独解决)。
+
+**🔧 追加修复(2026-08-14,用户真机反馈)**:Web 端重复点"启动视频流"报 500"启动失败"。真机排查:流实际在跑(mjpg_streamer 健康、8080 出图正常),根因 = 启动接口不幂等——已在运行时 start_stream 返回 false → 500,前端刷新后状态清零/双端一方已启动时,再点启动就被误报失败。修复:① start_stream/start_record 幂等化(已运行 → 200 `{"ok":true,"message":"already running"}`);② web/index.html 页面加载时拉 /api/camera/status 同步按钮状态。已上板验证:重复启动三次均 200、启停循环正常。另提醒:板上曾有多个 gateway 实例并存(手动多次启动),M5 修复后新实例绑定失败会显式退出,正常只需一个。
+
+**🔀 通道切换通知 MCU(2026-08-14,用户真机反馈)**:用户按下 MQTT/ZigBee 切换按钮后,网关只切了自己的下发通道,**没有给单片机发任何指令**。修复:切换成功后网关**经旧通道**下发 `chsw` 信封通知单片机切换通信模块——`{"type":"chsw","dev":"mcu01","ts":"...","body":{"transport":"zigbee"}}`(MQTT→ZigBee 经 MQTT 发,ZigBee→MQTT 经串口发)。实现:Control::build_channel_switch_envelope + ChannelManager::send_via(按指定通道下发,不理会当前通道)+ main.cpp 切换路由在 switch_to 前记旧通道、成功后经旧通道通知(失败只告警不阻断,兼容"单片机双通道常监听"的原设计)。板上实测:cmd topic 实捕到 chsw(zigbee)、日志确认串口侧下发 chsw(mqtt),双方向全通。API 文档 §11/§14.2/§14.6 已同步(单片机固件需实现 chsw 类型处理)。
+
+**🔧 LED 命令附带亮度字段(2026-08-14,用户真机反馈)**:观察 cmd topic 发现网关下发 `{"led_on":1}` 单字段,用户判断"没发亮度字段导致单片机解析不了,灯不亮"(单片机固件按整帧解析,只有 led_on 无 led_br 时 PWM 置 0)。修复:网关下发 led_on 命令时**总是附带 led_br**(当前缓存亮度,无缓存默认 50)——新增 Control::build_led_envelope;Device 暴露 led_brightness();/api/actuators/led_1/set 与规则引擎 fire()(field=="led_on",亮度由 main 注入 current_led_brightness 回调)两条路径统一走双字段信封。板上实测:单执行器开灯带 50(默认)→ 调亮度 30 后再开灯带 30(缓存)→ 规则触发同样带 30,全链路通过。API 文档 §7.3/§14.5 已同步。
+
+**❌ 误诊回退记录(2026-08-14)**:曾把"暗光开灯不亮"诊断为"阈值零死区 + LED 漏光反馈震荡",为规则引擎加了 cooldown 冷却字段。**用户实测确认真因是 LED 命令缺 led_br 亮度字段**(单片机整帧解析,只有 led_on 时 PWM=0,灯开了看不见)——led_br 修复(见下条)生效后问题即解决,"狂跳"并非规则震荡。cooldown 代码已回退(rule_engine.h/.cpp 恢复原状)。LED 规则阈值最终采用**回滞带**:开灯 `<1500`、关灯 `>=2200`(死区 1500~2200,实测读数亮 ~2500/遮光 ~1400)——用户选定。保留的教训:联调出现"下发无效"类现象时,先抓 cmd topic 看报文字段是否与固件解析约定一致,再怀疑控制逻辑。
+
+**🎥 视频流生命周期重构(2026-08-14,用户拍板"方案 A")**:用户指出"流的启停不应由客户端按钮控制,客户端只拉画面,一端关闭不应影响另一端"。定性:单摄像头 + 单 mjpg_streamer 进程,旧 UI 把"关全局流"的按钮放在每个客户端上,谁点谁断大家。方案 A 落地:① 网关启动自动拉起推流(main.cpp,约 9 行);② start_stream 语义 = ensure(幂等),客户端打开页面时兜底调用;③ stop_stream 保留为管理员接口(老师验收要用),正常 UI 不再触发;④ web 前端去掉"开始/停止推流"按钮,改为"拍照/录像/刷新画面",打开页面自动 ensure + 拉 8080 画面;⑤ API 文档 §10 重写生命周期模型说明 + Qt 同事约定(不要放停止按钮)。**方案 B(演进方向,未实施)**:网关代理 /stream + 观众引用计数 + 空闲超时自动停流——解决"没人看还烧 CPU"问题,需验证 mongoose 转发视频流性能,答辩可作下一步讲。
+
 ### 📡 通信协议定稿(2026-08-11 盘点,唯一权威)
 
 > 来源:桌面《项目实现教程-v2.0.md》第 5 章(v1.0/开发流程指南里的命令表已过时,以本表为准)

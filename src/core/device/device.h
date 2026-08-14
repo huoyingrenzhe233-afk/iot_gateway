@@ -66,6 +66,11 @@ namespace gateway
         // 设备在线状态(最近上报时间,空=从未上报)
         std::string last_seen() const { return last_seen_; }
 
+        // 缓存的 LED 亮度(0-100)。网关下发 led_on 命令时附带此值,
+        // 兼容"整帧解析"型 MCU 固件(只收到 led_on 没有 led_br 时会把
+        // PWM 置 0,灯"开了但看不见")。0 = 从未设置过。
+        int led_brightness() const { return actuators_.led_br; }
+
     private:
         SensorReading sensors_;   // 传感器测量值
         ActuatorState actuators_; // 执行器状态缓存

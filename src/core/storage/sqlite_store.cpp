@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <vector>     // query_history 的行缓冲(倒序收集后反转)
 #include <mongoose.h> // mg_json_get_str/num(纯函数,线程安全,写线程里解析用)
 #include <sqlite3.h>  // vendored amalgamation
 
@@ -61,7 +62,12 @@ namespace gateway
         if (hh) sqlite3_bind_double(stmt, 3, humi); else sqlite3_bind_null(stmt, 3);
         if (hl) sqlite3_bind_double(stmt, 4, light); else sqlite3_bind_null(stmt, 4);
         if (hi) sqlite3_bind_double(stmt, 5, ir);    else sqlite3_bind_null(stmt, 5);
-        sqlite3_step(stmt);
+        int rc = sqlite3_step(stmt);
+        if (rc != SQLITE_DONE)
+        {
+            // 磁盘满/IO 错误等:至少留条日志(L3 修复),否则遥测静默丢失
+            LOG_WARN("storage: insert failed: %s", sqlite3_errmsg(db));
+        }
         sqlite3_finalize(stmt);
         free(ts);
         return true;
@@ -72,13 +78,15 @@ namespace gateway
     // ------------------------------------------------------------
     bool SqliteStore::init(const std::string &db_path)
     {
-        if (sqlite3_open(db_path.c_str(), &db_) != SQLITE_OK)
+        sqlite3 *raw = nullptr;
+        if (sqlite3_open(db_path.c_str(), &raw) != SQLITE_OK)
         {
             LOG_ERROR("storage: open %s failed: %s", db_path.c_str(),
-                      db_ ? sqlite3_errmsg(db_) : "unknown");
-            if (db_) { sqlite3_close(db_); db_ = nullptr; }
+                      raw ? sqlite3_errmsg(raw) : "unknown");
+            if (raw) { sqlite3_close(raw); }
             return false;
         }
+        db_.store(raw); // 原子发布:此后写线程/enqueue 才可见
         // 建表(幂等):遥测历史 + 规则启停状态
         const char *t1 =
             "CREATE TABLE IF NOT EXISTS telemetry ("
@@ -88,10 +96,23 @@ namespace gateway
         const char *t2 =
             "CREATE TABLE IF NOT EXISTS rules_state ("
             "rule_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL)";
-        sqlite3_exec(db_, t1, nullptr, nullptr, nullptr);
-        sqlite3_exec(db_, t2, nullptr, nullptr, nullptr);
+        char *err = nullptr;
+        sqlite3_exec(raw, t1, nullptr, nullptr, &err);
+        if (err != nullptr)
+        {
+            LOG_WARN("storage: create telemetry failed: %s", err);
+            sqlite3_free(err);
+            err = nullptr;
+        }
+        sqlite3_exec(raw, t2, nullptr, nullptr, &err);
+        if (err != nullptr)
+        {
+            LOG_WARN("storage: create rules_state failed: %s", err);
+            sqlite3_free(err);
+            err = nullptr;
+        }
         // WAL:读(查询曲线)写(批量落库)互不阻塞
-        sqlite3_exec(db_, "PRAGMA journal_mode=WAL", nullptr, nullptr, nullptr);
+        sqlite3_exec(raw, "PRAGMA journal_mode=WAL", nullptr, nullptr, nullptr);
         LOG_INFO("storage: opened %s", db_path.c_str());
 
         stop_ = false;
@@ -106,7 +127,8 @@ namespace gateway
     // ------------------------------------------------------------
     void SqliteStore::writer_loop()
     {
-        std::vector<std::string> batch;
+        sqlite3 *db = db_.load(); // 写线程启动时 db_ 已由 init 原子发布
+        std::deque<std::string> batch;
         while (true)
         {
             {
@@ -119,16 +141,23 @@ namespace gateway
                 }
                 batch.swap(pending_); // 取走全部待写,释放锁
             }
-            if (!batch.empty())
+            if (!batch.empty() && db != nullptr)
             {
                 // 单事务批量写:一次 fsync 落多条,避免逐条 fsync 的慢
                 std::lock_guard<std::mutex> dblk(db_mutex_);
-                sqlite3_exec(db_, "BEGIN", nullptr, nullptr, nullptr);
+                sqlite3_exec(db, "BEGIN", nullptr, nullptr, nullptr);
                 for (const std::string &env : batch)
                 {
-                    insert_telemetry(db_, env);
+                    insert_telemetry(db, env);
                 }
-                sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr);
+                char *err = nullptr;
+                if (sqlite3_exec(db, "COMMIT", nullptr, nullptr, &err) != SQLITE_OK)
+                {
+                    // 磁盘满等:留日志,别静默丢批(L3 修复)
+                    LOG_WARN("storage: batch commit failed: %s",
+                             err != nullptr ? err : "unknown");
+                    if (err != nullptr) sqlite3_free(err);
+                }
                 batch.clear();
             }
         }
@@ -139,10 +168,17 @@ namespace gateway
     // ------------------------------------------------------------
     void SqliteStore::enqueue_telemetry(const std::string &sensor_envelope)
     {
-        if (db_ == nullptr) return; // 未初始化成功,直接丢弃(遥测历史可丢)
+        if (db_.load() == nullptr) return; // 未初始化成功,直接丢弃(遥测历史可丢)
         {
             std::lock_guard<std::mutex> lk(queue_mutex_);
             pending_.push_back(sensor_envelope);
+            // 队列上限(M2 修复):写线程因磁盘卡死停摆时,队列无限增长
+            // 会撑爆内存。超限丢最旧(遥测可丢,系统活着更重要)。
+            if (pending_.size() > 10000)
+            {
+                pending_.pop_front();
+                LOG_WARN("storage: telemetry queue full, dropped oldest");
+            }
         }
         cv_.notify_one();
     }
@@ -153,11 +189,12 @@ namespace gateway
     void SqliteStore::save_rule_state(const std::string &rule_id, bool enabled)
     {
         std::lock_guard<std::mutex> lk(db_mutex_);
-        if (db_ == nullptr) return;
+        sqlite3 *db = db_.load();
+        if (db == nullptr) return;
         const char *sql =
             "INSERT OR REPLACE INTO rules_state (rule_id, enabled) VALUES (?,?)";
         sqlite3_stmt *stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
         sqlite3_bind_text(stmt, 1, rule_id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int(stmt, 2, enabled ? 1 : 0);
         sqlite3_step(stmt);
@@ -170,10 +207,11 @@ namespace gateway
     void SqliteStore::load_rule_states(std::map<std::string, bool> &out)
     {
         std::lock_guard<std::mutex> lk(db_mutex_);
-        if (db_ == nullptr) return;
+        sqlite3 *db = db_.load();
+        if (db == nullptr) return;
         const char *sql = "SELECT rule_id, enabled FROM rules_state";
         sqlite3_stmt *stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
         while (sqlite3_step(stmt) == SQLITE_ROW)
         {
             std::string id((const char *)sqlite3_column_text(stmt, 0));
@@ -192,12 +230,13 @@ namespace gateway
         if (limit <= 0) limit = 100;
         if (limit > 1000) limit = 1000; // 上限防呆,别一次拉爆内存
         std::lock_guard<std::mutex> lk(db_mutex_);
-        if (db_ == nullptr) return "[]";
+        sqlite3 *db = db_.load();
+        if (db == nullptr) return "[]";
 
         const char *sql =
             "SELECT ts,temp,humi,light,ir FROM telemetry ORDER BY id DESC LIMIT ?";
         sqlite3_stmt *stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
             return "[]";
         sqlite3_bind_int(stmt, 1, limit);
 
@@ -255,10 +294,10 @@ namespace gateway
         {
             writer_.join();
         }
-        if (db_ != nullptr)
+        sqlite3 *db = db_.exchange(nullptr); // 先摘除再关库,杜绝任何并发访问
+        if (db != nullptr)
         {
-            sqlite3_close(db_);
-            db_ = nullptr;
+            sqlite3_close(db);
         }
         LOG_INFO("storage: closed");
     }

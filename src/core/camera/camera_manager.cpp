@@ -1,7 +1,7 @@
 // ============================================================
 // 摄像头管理实现(mjpg-streamer 推流 + wget 抓拍 + ffmpeg 录像)
 // 进程模型:
-//   - 所有子进程都用 fork()+execvp() 启动(绝不用 system()/popen(),
+//   - 所有子进程都用 fork()+execv() 启动(绝不用 system()/popen(),
 //     避免 shell 注入和阻塞事件循环)
 //   - 子进程关闭继承的 fd、stdout/stderr 重定向到 /dev/null
 //   - 子进程退出后的僵尸由 main.cpp 的 reap_children 定时器收割
@@ -10,7 +10,9 @@
 #include "core/camera/camera_manager.h"
 #include "core/common/logger/logger.h" // LOG_INFO/LOG_WARN/LOG_ERROR
 #include <cerrno>     // errno(ECHILD 等,waitpid 非阻塞探测用)
+#include <chrono>     // 毫秒时间戳(timestamp 用)
 #include <cstdio>
+#include <cstdlib>    // getenv(resolve_executable 的 PATH 查找)
 #include <cstring>
 #include <ctime>
 #include <fcntl.h>     // open/O_WRONLY(子进程重定向 /dev/null)
@@ -24,32 +26,97 @@ namespace gateway
 {
 
   // ------------------------------------------------------------
-  // timestamp:当前时间戳,格式 "%Y%m%d_%H%M%S"
-  //   例:20260813_101530(抓拍/录像文件名用,保证不重名)
+  // timestamp:当前时间戳,格式 "%Y%m%d_%H%M%S_%03d"(带毫秒)
+  //   例:20260813_101530_123(抓拍/录像文件名用;毫秒级保证同一秒内
+  //   双端并发抓拍/录像不会同名覆盖)
   // 用 localtime_r + strftime(非线程安全的 gmtime 不用)
   // ------------------------------------------------------------
   static std::string timestamp()
   {
-    char buf[32];
+    char buf[40];
     std::time_t now = std::time(nullptr);
     struct tm tm = {};
     localtime_r(&now, &tm);
     strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tm);
-    return std::string(buf);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::system_clock::now().time_since_epoch()) %
+              1000;
+    char out[48];
+    std::snprintf(out, sizeof(out), "%s_%03d", buf, static_cast<int>(ms.count()));
+    return std::string(out);
   }
 
   // ------------------------------------------------------------
-  // spawn:fork + execvp 启动一个外部程序
-  //   argv = 程序名 + 参数列表(不含 shell 解析,整串参数原样传给 execvp)
+  // resolve_executable:在父进程(fork 前)把命令名解析成绝对路径
+  //   带 '/' 直接用;否则按 PATH 逐目录找可执行文件。
+  //   为什么在父进程做:fork 后的子进程里 execvp 内部可能 malloc
+  //   (glibc 实现),多线程进程 fork 后有 malloc 死锁风险(见 spawn 注释)。
+  //   解析不成功返回原名字,execv 失败后子进程 _exit(127),与 execvp 行为一致。
+  // ------------------------------------------------------------
+  static std::string resolve_executable(const std::string &name)
+  {
+    if (name.find('/') != std::string::npos)
+    {
+      return name; // 已带路径,直接用
+    }
+    const char *path_env = getenv("PATH");
+    if (path_env == nullptr)
+    {
+      return name;
+    }
+    std::string path_list(path_env);
+    size_t start = 0;
+    while (start <= path_list.size())
+    {
+      size_t end = path_list.find(':', start);
+      std::string dir = (end == std::string::npos)
+                            ? path_list.substr(start)
+                            : path_list.substr(start, end - start);
+      if (dir.empty())
+      {
+        dir = ".";
+      }
+      std::string full = dir + "/" + name;
+      if (access(full.c_str(), X_OK) == 0)
+      {
+        return full;
+      }
+      if (end == std::string::npos)
+      {
+        break;
+      }
+      start = end + 1;
+    }
+    return name; // 没找到:保持原名字,execv 失败后 _exit(127)
+  }
+
+  // ------------------------------------------------------------
+  // spawn:fork + execv 启动一个外部程序
+  //   argv = 程序名 + 参数列表(不含 shell 解析,整串参数原样传给 execv)
+  //   线程安全要点(M1 修复):argv→char* 数组转换、PATH 解析、可执行文件
+  //   定位全部在 fork 之前的父进程完成;子进程在 exec 前只做
+  //   close/open/dup2/execv 这些 async-signal-safe 调用,绝不 malloc。
+  //   原因:进程里常驻 SQLite 写线程,fork 只复制调用线程;若 fork 瞬间
+  //   另一线程正持有 malloc 锁,子进程里任何 malloc 都会永久死锁。
   //   子进程:
   //     1. 关闭 [3, sysconf(_SC_OPEN_MAX)) 所有继承的 fd
   //        (否则网关的监听 socket/日志文件会被子进程长期占着)
   //     2. stdout/stderr 重定向到 /dev/null(mjpg_streamer/ffmpeg 不刷屏)
-  //     3. execvp 执行;失败则 _exit(127)(标准"命令未找到"退出码)
+  //     3. execv 执行;失败则 _exit(127)(标准"命令未找到"退出码)
   //   父进程:直接返回子进程 pid(fork 失败返回 -1)
   // ------------------------------------------------------------
   static pid_t spawn(const std::vector<std::string> &argv)
   {
+    // ---- fork 前(父进程,多线程安全):准备 exec 用的绝对路径和 char* 数组 ----
+    std::string exe = resolve_executable(argv[0]);
+    std::vector<char *> cargv;
+    cargv.reserve(argv.size() + 1);
+    for (size_t i = 0; i < argv.size(); i++)
+    {
+      cargv.push_back(const_cast<char *>(argv[i].c_str()));
+    }
+    cargv.push_back(nullptr);
+
     pid_t pid = fork();
     if (pid < 0)
     {
@@ -58,7 +125,7 @@ namespace gateway
     }
     if (pid == 0)
     {
-      // ---- 子进程 ----
+      // ---- 子进程:只做 async-signal-safe 调用 ----
       // 关掉所有继承的 fd:exec 前必须做,否则子进程永远占着
       // 网关的 socket 和日志文件,父进程无法复用它们
       long maxfd = sysconf(_SC_OPEN_MAX);
@@ -74,17 +141,8 @@ namespace gateway
         dup2(devnull, 2);
         close(devnull);
       }
-      // execvp 要 char** 数组,std::vector<std::string> 不能直接传,
-      // 先转成临时 char* 数组(结尾补 nullptr)
-      std::vector<char *> cargv;
-      cargv.reserve(argv.size() + 1);
-      for (size_t i = 0; i < argv.size(); i++)
-      {
-        cargv.push_back(const_cast<char *>(argv[i].c_str()));
-      }
-      cargv.push_back(nullptr);
-      execvp(argv[0].c_str(), cargv.data());
-      _exit(127); // execvp 失败才会走到这里(命令不存在等)
+      execv(exe.c_str(), cargv.data());
+      _exit(127); // execv 失败才会走到这里(命令不存在等)
     }
     // ---- 父进程:返回子进程 pid ----
     return pid;
@@ -138,8 +196,11 @@ namespace gateway
   // ------------------------------------------------------------
   // stop_child:优雅停止一个子进程,不无限阻塞事件循环
   //   SIGTERM 请求退出 → 每 50ms 非阻塞探测(WNOHANG) → 超时 SIGKILL 强杀
-  //   为什么:原 waitpid(pid,0) 若子进程卡死不响应 SIGTERM,事件循环冻结
-  //   返回 true = 进程已停止(pid 被置 -1)
+  //   → 再限时 1s 收尸;仍收不到就放弃(交给 reap_children 兜底)。
+  //   为什么:原 waitpid(pid,0) 若子进程卡死不响应 SIGTERM,事件循环冻结;
+  //   且子进程若处于 D 状态(不可中断 IO),连 SIGKILL 都无法立即终止,
+  //   无限阻塞 waitpid 会把整个网关冻死。所有等待都有上限。
+  //   返回 true = 进程已停止或已交给兜底回收(pid 被置 -1,允许重启)
   // ------------------------------------------------------------
   static bool stop_child(pid_t &pid, int timeout_ms)
   {
@@ -163,8 +224,20 @@ namespace gateway
     }
     // 超时未退出:SIGKILL 强杀(SIGKILL 不可忽略/阻塞,进程必死)
     kill(pid, SIGKILL);
-    waitpid(pid, NULL, 0); // 强杀后收尸,几乎立即返回
-    pid = -1;
+    // 强杀后收尸也限时(1s):D 状态进程可能暂时杀不掉,继续无限等会冻死事件循环
+    int waited2 = 0;
+    while (waited2 < 1000)
+    {
+      int st = 0;
+      pid_t r = waitpid(pid, &st, WNOHANG);
+      if (r == pid || (r < 0 && errno == ECHILD))
+      {
+        break; // 已收尸(或已被 reap_children 收走)
+      }
+      usleep(50 * 1000);
+      waited2 += 50;
+    }
+    pid = -1; // 极端情况(进程仍在 D 状态):放弃跟踪,僵尸由 reap_children 兜底
     return true;
   }
 
@@ -194,6 +267,14 @@ namespace gateway
     if (record_running())
     {
       return false; // 已经在录像
+    }
+    // 录像依赖推流:流没启动就 fork ffmpeg,ffmpeg 连不上会立刻退出,
+    // 但 API 已返回 ok=true → 前端 recordStarted=true 与真实状态失步。
+    // 这里前置校验,未推流直接拒绝(调用方回 500/明确错误)。
+    if (!stream_running())
+    {
+      LOG_WARN("camera: start_record rejected (stream not running)");
+      return false;
     }
     // 录像输出目录 records/,不存在就建(mkdir 已存在返回 EEXIST,
     // 忽略即可 —— 目录在不在都是成功)
@@ -239,21 +320,52 @@ namespace gateway
   }
 
   // ------------------------------------------------------------
+  // wait_exit_ok:限时等待子进程退出,返回"是否以 0 退出码正常退出"
+  //   只等不杀(用 WNOHANG 轮询,永不无限阻塞);超时返回 false,
+  //   僵尸留给 reap_children 兜底。
+  // ------------------------------------------------------------
+  static bool wait_exit_ok(pid_t pid, int timeout_ms)
+  {
+    int waited = 0;
+    while (waited < timeout_ms)
+    {
+      int st = 0;
+      pid_t r = waitpid(pid, &st, WNOHANG);
+      if (r == pid)
+      {
+        return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+      }
+      if (r < 0 && errno == ECHILD)
+      {
+        return false; // 已被 reap_children 收割,拿不到退出码,按失败处理
+      }
+      usleep(50 * 1000);
+      waited += 50;
+    }
+    return false; // 超时按失败处理
+  }
+
+  // ------------------------------------------------------------
   // snapshot:抓拍一帧(fork wget 抓 ?action=snapshot 单张 JPEG)
-  // 这是唯一阻塞方法:waitpid 等 wget 退出(抓一帧 ~0.2s,可接受)
+  // 等待有硬上限(H1 修复):wget 加 -T 5 总超时 + 网关侧限时 7s 轮询。
+  // 历史隐患:wget 默认读超时 900s,若 mjpg_streamer 进程活着但流卡住,
+  // 一次抓拍会把整个事件循环冻死 15 分钟。现在最坏只等 7 秒。
   // 成功:filename 回填纯文件名(不带目录,前端拼 URL 用)
   // ------------------------------------------------------------
   bool CameraManager::snapshot(std::string &filename)
   {
     // 抓拍输出目录 snapshots/,不存在就建
     mkdir("snapshots", 0755);
-    // 纯文件名:snapshot_20260813_101530.jpg(返回给调用方)
+    // 纯文件名:snapshot_20260813_101530_123.jpg(毫秒级,双端并发不覆盖)
     filename = "snapshot_" + timestamp() + ".jpg";
     std::string path = "snapshots/" + filename;
-    // wget -q -O <path> http://127.0.0.1:8080/?action=snapshot
+    // wget -q -T 5 -O <path> http://127.0.0.1:8080/?action=snapshot
+    // -T 5:网络总超时 5 秒(busybox wget 与 GNU wget 均支持),防流卡住时挂 900s
     std::vector<std::string> argv;
     argv.push_back("wget");
     argv.push_back("-q"); // 安静模式(出错信息已重定向到 /dev/null)
+    argv.push_back("-T");
+    argv.push_back("5");  // 总超时 5 秒
     argv.push_back("-O");
     argv.push_back(path);
     argv.push_back("http://127.0.0.1:" + std::to_string(port_) + "/?action=snapshot");
@@ -263,18 +375,14 @@ namespace gateway
       LOG_ERROR("camera snapshot FAILED: fork/exec wget failed");
       return false;
     }
-    // 阻塞等 wget 退出(快:一帧 JPEG 就几 KB)
-    int st = 0;
-    waitpid(pid, &st, 0);
-    if (WIFEXITED(st) && WEXITSTATUS(st) == 0)
+    // 限时等待(wget 自身 5s 超时,这里给 7s 裕量):正常抓一帧 ~0.2s 返回
+    if (wait_exit_ok(pid, 7000))
     {
-      // wget 退出码 0 = 抓到并写盘成功
       LOG_INFO("camera snapshot ok: %s", path.c_str());
       return true;
     }
-    // 退出码非 0 = 抓取失败(最常见原因:mjpg_streamer 还没启动)
-    LOG_WARN("camera snapshot FAILED: wget exit=%d (stream not running?)",
-             WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+    // 退出码非 0 / 超时 = 抓取失败(最常见原因:mjpg_streamer 还没启动或流卡住)
+    LOG_WARN("camera snapshot FAILED: wget error or timeout (stream not running?)");
     return false;
   }
 

@@ -323,12 +323,26 @@ namespace gateway {
     // fire:组控制命令信封并回调 on_action(不下发=哑弹,所以必须回调)
     // 信封格式复用 Control::build_field_envelope(协议格式单一来源):
     //   {"type":"cmd","dev":"mcu01","ts":"2026-08-13 10:00:00","body":{"buzzer":1}}
-    // 只下发 rule.field 这一个字段(规则引擎只负责单一动作)。
+    // 特例:field == "led_on" 时改用 build_led_envelope,开关附带当前亮度
+    // (兼容整帧解析型 MCU 固件:只发 led_on 没有 led_br 会 PWM=0 看不见)。
     // ------------------------------------------------------------
     void RuleEngine::fire(const Rule &rule)
     {
-        std::string envelope =
-            Control::build_field_envelope(device_id_, rule.field, rule.value);
+        std::string envelope;
+        if (rule.field == "led_on")
+        {
+            int br = current_led_brightness ? current_led_brightness() : 0;
+            if (br <= 0)
+            {
+                br = 50; // 缓存无亮度(如刚重启):用默认 50%
+            }
+            envelope = Control::build_led_envelope(device_id_, rule.value, br);
+        }
+        else
+        {
+            envelope =
+                Control::build_field_envelope(device_id_, rule.field, rule.value);
+        }
         // 动作回调:main.cpp 里赋值 = 发布到 MQTT + 同步状态缓存
         if (on_action)
         {

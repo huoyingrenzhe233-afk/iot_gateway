@@ -1,6 +1,12 @@
 # 规则引擎规则
 # ⚠️ sensor/actuator 的 id 必须与 config/devices/*.yaml 的 id 一致
 # 边沿触发:条件从不满足变满足的瞬间触发一次动作(恢复规则负责回退)
+#
+# LED 规则用回滞带(实测读数:亮 ~2500,遮光 ~1400):
+#   暗光开灯:读数 < 1500 时开灯
+#   亮光关灯:读数 >= 2200 时关灯
+#   中间 1500~2200 是死区:读数在死区内两条规则都不动作,灯保持现状,
+#   防止遮光过程中读数在阈值附近抖动导致灯来回闪。
 rules:
   - id: temp_alarm
     name: 高温报警
@@ -30,7 +36,7 @@ rules:
     when:
       sensor: light_1
       op: "<"
-      value: 100
+      value: 1500
     then:
       actuator: led_1
       field: led_on
@@ -41,7 +47,7 @@ rules:
     when:
       sensor: light_1
       op: ">="
-      value: 100
+      value: 2200
     then:
       actuator: led_1
       field: led_on

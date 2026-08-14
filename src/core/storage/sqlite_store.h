@@ -16,11 +16,11 @@
 // ============================================================
 #include <atomic>
 #include <condition_variable>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <string>
 #include <thread>
-#include <vector>
 
 struct sqlite3; // 前向声明(定义在 third_party/sqlite3.h)
 
@@ -53,11 +53,14 @@ namespace gateway
     private:
         void writer_loop();
 
-        sqlite3 *db_ = nullptr;
+        // db_ 是原子指针(M2 修复):enqueue_telemetry 在事件循环线程
+        // 无锁判空(shutdown 会在写线程 join 之后把它置回 nullptr);
+        // 其余所有真实 DB 操作仍统一在 db_mutex_ 下串行化。
+        std::atomic<sqlite3 *> db_{nullptr};
         std::mutex db_mutex_;               // 保护所有 DB 访问(写线程 + 低频直接访问)
         std::mutex queue_mutex_;            // 保护 pending_ 队列
         std::condition_variable cv_;        // 唤醒写线程(有数据/停止)
-        std::vector<std::string> pending_;  // 待写遥测队列(唯一跨线程共享)
+        std::deque<std::string> pending_;   // 待写遥测队列(唯一跨线程共享;有上限,超限丢最旧)
         std::atomic<bool> stop_{false};     // 停止标志(原子,跨线程读写)
         std::thread writer_;
     };
