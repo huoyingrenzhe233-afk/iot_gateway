@@ -106,7 +106,7 @@
 
         .video-bar {
             display: grid;
-            grid-template-columns: repeat(4, 1fr);
+            grid-template-columns: repeat(3, 1fr);
             gap: 10px;
             margin-top: 15px;
         }
@@ -319,10 +319,11 @@
                     <img id="videoPlayer" alt="摄像头画面">
                 </div>
                 <div class="video-bar">
-                    <button id="streamStartBtn" class="btn btn-stream-start">▶ 开始推流</button>
-                    <button id="streamStopBtn" class="btn btn-stream-stop" disabled>⏹ 停止推流</button>
+                    <!-- 视频流生命周期由网关托管:这里不再有"启停推流"按钮,打开页面自动看画面,
+                         任意一端都不会影响另一端。录像/拍照是用户动作,独立不影响观看。 -->
                     <button id="snapshotBtn" class="btn btn-cap">📸 抓拍照片</button>
                     <button id="recordBtn" class="btn btn-rec">🔴 视频录制</button>
+                    <button id="refreshBtn" class="btn btn-stream-start">🔄 刷新画面</button>
                 </div>
             </div>
 
@@ -391,33 +392,32 @@
 
     <script>
         // ========== 视频流核心配置 ==========
+        // 设计:视频流生命周期由网关托管——网关启动时自动拉起 mjpg_streamer,
+        // 前端(Qt 同理)只负责"看画面":打开页面自动确保流在跑 + 直接拉流。
+        // 任意一端都不会影响另一端的画面(没有"停止推流"按钮)。
         // MJPEG 流地址:mjpg-streamer 跑在 8080 端口,用 <img> 直接显示(零转码)
         const STREAM_URL = `http://${location.hostname}:8080/?action=stream`;
-        const API_START_STREAM = '/api/camera/start_stream';
-        const API_STOP_STREAM = '/api/camera/stop_stream';
+        const API_START_STREAM = '/api/camera/start_stream'; // 幂等 ensure:已在跑返回 200 already running
         const API_START_RECORD = '/api/camera/start_record';
         const API_STOP_RECORD = '/api/camera/stop_record';
         const API_SNAPSHOT = '/api/camera/snapshot';
 
         // 全局状态
-        let streamStarted = false;
         let recordStarted = false;
 
         // DOM元素
         const video = document.getElementById('videoPlayer');
-        const streamStartBtn = document.getElementById('streamStartBtn');
-        const streamStopBtn = document.getElementById('streamStopBtn');
         const snapshotBtn = document.getElementById('snapshotBtn');
         const recordBtn = document.getElementById('recordBtn');
+        const refreshBtn = document.getElementById('refreshBtn');
 
-        // MJPEG 流加载重试:mjpg_streamer 启动有 1~2 秒延迟(摄像头初始化),
-        // 首帧可能"连接被拒",而 <img> 不会自动重试 → 必须手动重试
+        // MJPEG 流加载重试:mjpg_streamer 刚拉起有 1~2 秒初始化延迟,
+        // 首帧可能"连接被拒",而 <img> 不会自动重试 → 手动重试兜底
         let streamRetry = 0;
-        let streamLoadTimer = null; // 启动流时的延迟加载定时器(stop 时清掉,防快速启停残留)
+        let streamLoadTimer = null; // 延迟加载定时器(刷新时清掉,防残留)
         video.onerror = () => {
-            if (!streamStarted) return; // 已停止推流,不重试
             if (++streamRetry > 20) {
-                addLog('❌ 视频流连接失败,请检查摄像头是否连接');
+                addLog('❌ 视频流连接失败,请检查摄像头是否连接,或点"刷新画面"重试');
                 return;
             }
             // 加时间戳参数强制浏览器重新发起请求(绕过缓存)
@@ -459,54 +459,26 @@
             }
         }
 
-        // ========== 视频流控制逻辑 ==========
-        async function startStream() {
-            if (streamStarted) return;
+        // ========== 视频流控制逻辑(网关托管生命周期,客户端只"看") ==========
+        // ensureStream:请求网关确保推流在跑(幂等接口:已在跑直接 200)。
+        // 网关负责启动/常驻,客户端不负责启停 —— 所以两端互不影响。
+        async function ensureStream() {
             try {
-                addLog('正在启动视频流...');
-                await sendCommand(API_START_STREAM);
-
-                // 网关 fork mjpg_streamer 后,这里用 <img> 直连 MJPEG 流
-                // (MJPEG 是所有浏览器原生支持的图片流,无需 Hls.js、无需转码)
-                // ⚠️ mjpg_streamer 启动有 1~2 秒延迟,立即设 src 会"连接被拒"
-                // 导致坏图标;延迟 1.5s 再加载,配合 onerror 自动重试兜底
-                streamRetry = 0;
-                streamLoadTimer = setTimeout(() => { video.src = STREAM_URL; }, 1500);
-                addLog('✅ 视频流已启动(画面加载中...)');
-                streamStarted = true;
-                streamStartBtn.disabled = true;
-                streamStopBtn.disabled = false;
+                const res = await fetch(API_START_STREAM);
+                return res.ok;
             } catch (err) {
-                addLog(`❌ 视频流启动失败: ${err.message}`);
+                addLog(`⚠️ 视频流请求失败: ${err.message}`);
+                return false;
             }
         }
 
-        async function stopStream() {
-            if (!streamStarted) return;
-            try {
-                addLog('正在停止视频流...');
-                video.src = '';
-                if (streamLoadTimer) { clearTimeout(streamLoadTimer); streamLoadTimer = null; }
-                // 若正在录像,先停录像(录像依赖推流,先停可让 ffmpeg 正常收尾,避免留下损坏文件)
-                if (recordStarted) {
-                    try {
-                        await sendCommand(API_STOP_RECORD);
-                        recordStarted = false;
-                        recordBtn.innerHTML = '🔴 视频录制';
-                        addLog('⏹ 录像已随推流停止');
-                    } catch (e) {
-                        addLog(`⚠️ 停止录像出错: ${e.message}`);
-                    }
-                }
-                await sendCommand(API_STOP_STREAM);
-
-                streamStarted = false;
-                streamStartBtn.disabled = false;
-                streamStopBtn.disabled = true;
-                addLog('⏹ 视频流已停止');
-            } catch (err) {
-                addLog(`⚠️ 停止视频流出错: ${err.message}`);
-            }
+        // loadVideo:延迟加载画面(mjpg_streamer 刚拉起有 1~2s 初始化延迟)
+        function loadVideo(delayMs) {
+            if (streamLoadTimer) { clearTimeout(streamLoadTimer); }
+            streamRetry = 0;
+            streamLoadTimer = setTimeout(() => {
+                video.src = STREAM_URL + '?t=' + Date.now();
+            }, delayMs);
         }
 
         async function takeSnapshot() {
@@ -520,12 +492,12 @@
         }
 
         async function toggleRecord() {
-            if (!streamStarted) {
-                addLog('❌ 请先启动视频流再进行录像');
-                return;
-            }
-
             if (!recordStarted) {
+                // 先确保推流在跑(网关托管,幂等;摄像头重插后流可能已退出)
+                if (!(await ensureStream())) {
+                    addLog('❌ 推流未就绪,无法录像');
+                    return;
+                }
                 // 开始录像
                 try {
                     addLog('正在启动录像...');
@@ -616,11 +588,17 @@ function setMotorDirUser(dir) {
     );
 }
         // ========== 事件绑定 ==========
-        // 视频流按钮绑定
-        streamStartBtn.onclick = startStream;
-        streamStopBtn.onclick = stopStream;
+        // 视频按钮绑定:拍照 / 录像 / 刷新画面(刷新只重拉画面,不影响流本身,
+        // 更不影响另一端;若流因摄像头重插等原因退出了,ensure 会再拉起)
         snapshotBtn.onclick = takeSnapshot;
         recordBtn.onclick = toggleRecord;
+        refreshBtn.onclick = async () => {
+            addLog('🔄 刷新画面...');
+            video.src = '';
+            if (await ensureStream()) {
+                loadVideo(500);
+            }
+        };
 
         // 定时拉取传感器数据(带 in-flight 保护,防响应慢时请求堆积乱序)
         let polling = false;
@@ -721,17 +699,20 @@ function setMotorDirUser(dir) {
             if (d.transport) updateChannelBtn(d.transport);
         }).catch(() => {});
 
-        // 启动时同步摄像头状态:页面刷新后 streamStarted/recordStarted 会清零,
-        // 但网关侧的推流/录像可能还在跑——若不同步,用户再点"启动"会被网关
-        // 拒绝并误报"启动失败"。这里把按钮状态对齐真实状态。
-        fetch('/api/camera/status').then(r => r.json()).then(d => {
-            streamStarted = !!d.running;
-            recordStarted = !!d.recording;
-            streamStartBtn.disabled = streamStarted;
-            streamStopBtn.disabled = !streamStarted;
-            recordBtn.innerHTML = recordStarted ? '⏹ 停止录制' : '🔴 视频录制';
-            if (d.running) addLog('📹 视频流已在运行(已同步状态)');
-        }).catch(() => {});
+        // 页面加载:① 请求网关确保推流在跑(幂等,网关托管生命周期)
+        //            ② 延迟加载画面 ③ 同步录像按钮状态
+        (async () => {
+            if (await ensureStream()) {
+                loadVideo(1500); // 刚拉起有初始化延迟,1.5s 后加载
+            } else {
+                addLog('⚠️ 推流未就绪,稍后可点"刷新画面"重试');
+            }
+            fetch('/api/camera/status').then(r => r.json()).then(d => {
+                recordStarted = !!d.recording;
+                recordBtn.innerHTML = recordStarted ? '⏹ 停止录制' : '🔴 视频录制';
+                if (d.running) addLog('📹 视频流已就绪');
+            }).catch(() => {});
+        })();
 
         // 初始化日志
         addLog('[系统] 页面加载完成，设备控制就绪');

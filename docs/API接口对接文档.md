@@ -301,30 +301,32 @@ body["payload"] = payload;
 
 ## 10. 摄像头接口
 
-> 方案 C:全链路 MJPEG。`start_stream` 后网关会 fork `mjpg_streamer`,前端用 `<img>` 直连 8080 看流。以下接口 **GET / POST 都接受**。
+> **生命周期模型(重要)**:视频流由**网关托管**——网关启动时自动拉起 mjpg_streamer 并常驻;Web/Qt 客户端**只负责"看画面"**(直接拉 8080 的 MJPEG 流),**不负责启停流**。因此任意一端打开/关闭页面都只影响自己的观看连接,不会影响另一端的画面。"停止推流"接口仅作管理员用途。以下接口 **GET / POST 都接受**。
 
 | 接口 | 方法 | 说明 | 响应 |
 |---|---|---|---|
-| `/api/camera/start_stream`(别名 `/api/camera/start`) | GET/POST | 启动推流 | 200 `{"ok":true}` / 500 |
-| `/api/camera/stop_stream`(别名 `/api/camera/stop`) | GET/POST | 停止推流 | 200 `{"ok":true}` |
-| `/api/camera/start_record`(别名 `/api/camera/record/start`) | GET/POST | 开始录像(**需先推流**) | 200 `{"ok":true}` / 500 |
-| `/api/camera/stop_record`(别名 `/api/camera/record/stop`) | GET/POST | 停止录像 | 200 `{"ok":true}` |
+| `/api/camera/start_stream`(别名 `/api/camera/start`) | GET/POST | 确保推流在跑(**幂等**:已在跑返回 already running);客户端打开页面时调用它兜底(如板子重启/摄像头重插后自动恢复) | 200 `{"ok":true}` / 500 |
+| `/api/camera/stop_stream`(别名 `/api/camera/stop`) | GET/POST | **管理员手动关闭推流**(会中断所有客户端的画面;正常 UI 不要调用) | 200 `{"ok":true}` |
+| `/api/camera/start_record`(别名 `/api/camera/record/start`) | GET/POST | 开始录像(**需先推流**,幂等) | 200 `{"ok":true}` / 500 |
+| `/api/camera/stop_record`(别名 `/api/camera/record/stop`) | GET/POST | 停止录像(**只停录像,不影响画面**) | 200 `{"ok":true}` |
 | `/api/camera/snapshot` | GET/POST | 抓拍一帧 | 200 `{"ok":true,"filename":"snapshot_xxx.jpg"}` |
 | `/api/camera/status` | GET/POST | 状态查询 | `{"running":false,"recording":false}` |
 | `GET /snapshots/{filename}` | GET | 取回抓拍照片 | 200 图片 / 404 |
 
 > 别名(`start/stop`、`record/start|stop`)是为兼容老师 project-plan.md 的接口名,两套名字行为完全一致,用哪套都行。
 
-> 💡 **启动接口是幂等的**:推流/录像已在运行时,再次调用启动接口返回 200 `{"ok":true,"message":"already running"}`(不会报错、不会重复起进程)——页面刷新后重复点"启动"、或双端一方已启动另一方再点,都不会再看到"启动失败"。
+**看画面**(Web/Qt 通用,不需要启停接口):
+```
+推流已由网关常驻 → 客户端直接拉:http://<网关IP>:8080/?action=stream
+(Web 用 <img>;Qt 用 QNetworkAccessManager 或 QML Image 拉同一地址)
+可选兜底:打开页面时调一次 /api/camera/start_stream(幂等),防止板子重启后流未拉起
+```
 
-**视频流地址**(推流启动后,前端 `<img>` 直接显示):
-```
-http://<网关IP>:8080/?action=stream
-```
+**对 Qt 同事**:界面**不要放"停止推流"按钮**(它关的是全局流,会断掉 Web 端的画面);"不想看"= 关掉自己的观看连接即可。录像/拍照照常调用。
 
 **抓拍照片展示**:`snapshot` 返回的 `filename` 拼 `http://<网关IP>:8081/snapshots/<filename>` 即可用 `<img>` 显示。
 
-**录像顺序**:先 `start_stream`(推流)→ 再 `start_record`(录像);未推流时调 `start_record` 会被拒绝(500)。录像保存到网关 `records/` 目录。停止推流前请先停止录像。
+**录像顺序**:先确保推流(常驻,一般已就绪)→ 再 `start_record`;停止录像用 `stop_record`(**不影响画面**)。录像保存到网关 `records/` 目录。
 
 ---
 

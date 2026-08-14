@@ -892,6 +892,15 @@ int main(int argc, char *argv[])
   g_camera.set_config(config.camera_device, config.camera_port);
   LOG_INFO("camera: device=%s port=%d", config.camera_device.c_str(),
            config.camera_port);
+  // 视频流生命周期由网关托管:启动即自动拉起推流,Web/Qt 只负责"看画面"
+  // (8080 直连拉流),不再由客户端启停——这样一端开/关不会影响另一端的
+  // 画面(此前"停止推流"按钮是共享的,谁点谁断大家)。
+  // 摄像头没插时 fork 成功但 mjpg_streamer 会立即退出(stream_running=false),
+  // 之后客户端"刷新画面"的幂等 ensure(/api/camera/start_stream)会再拉起。
+  if (!g_camera.stream_running())
+  {
+    g_camera.start_stream();
+  }
   // 6.8 僵尸进程收割定时器:每 5s 回收一次已退出子进程(不阻塞事件循环)
   mg_timer_add(&mgr, 5000, MG_TIMER_REPEAT, reap_children, nullptr); // 僵尸收割
   // 6.9 遥测存储(static 常驻;队列+写线程:事件循环只 push,磁盘 IO 在写线程)
