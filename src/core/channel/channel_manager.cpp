@@ -104,4 +104,35 @@ namespace gateway
     return true;
   }
 
+  // ------------------------------------------------------------
+  // send_via:经指定通道下发(通道切换通知用,不理会当前通道)
+  //   MQTT  → mqtt_->publish(cmd_topic_, envelope)(需已连接)
+  //   ZIGBEE → zigbee_->send(envelope)(需串口已打开)
+  // ------------------------------------------------------------
+  bool ChannelManager::send_via(Transport t, const std::string &envelope)
+  {
+    if (t == Transport::ZIGBEE)
+    {
+      if (zigbee_ == nullptr || !zigbee_->is_open())
+      {
+        LOG_WARN("channel: zigbee send_via failed (serial not open)");
+        return false;
+      }
+      return zigbee_->send(envelope);
+    }
+    // ---- MQTT ----
+    if (mqtt_ == nullptr)
+    {
+      LOG_WARN("channel: mqtt send_via failed (mqtt not bound)");
+      return false;
+    }
+    if (!mqtt_->is_connected())
+    {
+      LOG_WARN("channel: mqtt send_via failed (not connected)");
+      return false;
+    }
+    mqtt_->publish(cmd_topic_, envelope);
+    return true;
+  }
+
 } // namespace gateway

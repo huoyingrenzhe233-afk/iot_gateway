@@ -442,25 +442,56 @@ static void request_handler(struct mg_connection *connect, int event,
           mg_http_reply(connect, 400, "Content-Type: application/json\r\n",
                         "{\"ok\":false,\"message\":\"invalid transport\"}");
         }
-        else if (ctx->channel == nullptr ||
-                 !ctx->channel->switch_to(
-                     ts == "zigbee" ? Transport::ZIGBEE : Transport::MQTT))
+        else if (ctx->channel == nullptr)
         {
-          // 目标通道未就绪(DL-30 没插、MQTT 未绑定等)→ 503,当前通道不变
+          // channel 未初始化(防御,理论上不会发生)
           mg_http_reply(connect, 503, "Content-Type: application/json\r\n",
                         "{\"ok\":false,\"message\":\"channel not ready\"}");
         }
         else
         {
-          // 切换成功:广播给所有 WS 客户端(4.2-③ 修复)——另一端的通道
-          // 按钮此前只在页面加载时查一次 /api/channel,不广播的话 Web 和
-          // Qt 会长期显示旧通道,再点一下又切回去,来回拉扯。
-          std::string notify = "{\"type\":\"channel\",\"transport\":\"";
-          notify += ts;
-          notify += "\"}";
-          ws_broadcast(notify);
-          mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
-                        "{\"ok\":true,\"transport\":\"%s\"}", ts.c_str());
+          Transport target =
+              (ts == "zigbee") ? Transport::ZIGBEE : Transport::MQTT;
+          Transport old_t = ctx->channel->current(); // 切换前的旧通道(通知要经它发)
+          if (!ctx->channel->switch_to(target))
+          {
+            // 目标通道未就绪(DL-30 没插等)→ 503,当前通道不变
+            mg_http_reply(connect, 503, "Content-Type: application/json\r\n",
+                          "{\"ok\":false,\"message\":\"channel not ready\"}");
+          }
+          else
+          {
+            // 通知单片机切换通信模块:经"旧通道"下发 chsw 信封——单片机
+            // 此刻还挂在旧通道上,MQTT→ZigBee 经 MQTT 发,ZigBee→MQTT 经
+            // 串口发。发送失败只告警不阻断(单片机若本来就在双通道监听,
+            // 通知是多余的;固件按需实现 chsw 处理即可)。
+            if (old_t != target)
+            {
+              std::string chsw = Control::build_channel_switch_envelope(
+                  ctx->config.device_id, ts);
+              bool notified = ctx->channel->send_via(old_t, chsw);
+              if (!notified)
+              {
+                LOG_WARN("channel: switch notify via old channel FAILED "
+                         "(mcU may not know about the switch)");
+              }
+              else
+              {
+                LOG_INFO("channel: switch notified mcU via %s: %s",
+                         old_t == Transport::MQTT ? "mqtt" : "zigbee",
+                         chsw.c_str());
+              }
+            }
+            // 切换成功:广播给所有 WS 客户端(4.2-③ 修复)——另一端的通道
+            // 按钮此前只在页面加载时查一次 /api/channel,不广播的话 Web 和
+            // Qt 会长期显示旧通道,再点一下又切回去,来回拉扯。
+            std::string notify = "{\"type\":\"channel\",\"transport\":\"";
+            notify += ts;
+            notify += "\"}";
+            ws_broadcast(notify);
+            mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
+                          "{\"ok\":true,\"transport\":\"%s\"}", ts.c_str());
+          }
         }
       }
     }

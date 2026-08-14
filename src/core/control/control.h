@@ -31,5 +31,12 @@ namespace gateway
     // 供 /api/actuators/led_1/set 和规则引擎的 led_on 动作使用。
     static std::string build_led_envelope(const std::string &device_id,
                                           long on, long brightness);
+
+    // 组通道切换通知信封(网关切通道时,经"旧通道"发给单片机,通知它把
+    // 通信模块切到新通道):
+    //   {"type":"chsw","dev":"mcu01","ts":"...","body":{"transport":"zigbee"}}
+    // transport = "mqtt" | "zigbee"。单片机固件需实现该类型的处理。
+    static std::string build_channel_switch_envelope(const std::string &device_id,
+                                                     const std::string &transport);
   };
 } // namespace gateway

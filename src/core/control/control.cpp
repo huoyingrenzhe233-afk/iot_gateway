@@ -111,4 +111,31 @@ namespace gateway
     envelope += "}}";
     return envelope;
   }
+
+  // ------------------------------------------------------------
+  // build_channel_switch_envelope:组通道切换通知信封
+  //   {"type":"chsw","dev":"mcu01","ts":"...","body":{"transport":"zigbee"}}
+  // 网关切换通道成功后,经"旧通道"发给单片机,通知其切换通信模块
+  // (MQTT→ZigBee 经 MQTT 发;ZigBee→MQTT 经串口发)。
+  // ------------------------------------------------------------
+  std::string Control::build_channel_switch_envelope(const std::string &device_id,
+                                                     const std::string &transport)
+  {
+    char ts[32];
+    std::time_t now = std::time(nullptr);
+    struct tm tm = {};
+    localtime_r(&now, &tm);
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm);
+
+    std::string envelope;
+    envelope.reserve(128);
+    envelope += "{\"type\":\"chsw\",\"dev\":\"";
+    envelope += device_id;
+    envelope += "\",\"ts\":\"";
+    envelope += ts;
+    envelope += "\",\"body\":{\"transport\":\"";
+    envelope += transport;
+    envelope += "\"}}";
+    return envelope;
+  }
 } // namespace gateway
