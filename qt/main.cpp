@@ -1,11 +1,16 @@
 #include "widget.h"
 
 #include <QApplication>
+#include <QCommandLineParser>
 
 int main(int argc, char *argv[])
 {
     QApplication a(argc, argv);
-    Widget w;
+    QCommandLineParser parser;
+    parser.addHelpOption();
+    parser.addPositionalArgument("host", "Gateway host", "host");
+    parser.process(a);
+    Widget w(parser.positionalArguments().value(0, "127.0.0.1"));
     w.show();
     return a.exec();
 }

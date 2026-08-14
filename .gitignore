@@ -35,3 +35,9 @@ gateway.db-shm
 # Qt
 *.pro.user
 *.autosave
+qt/Makefile
+qt/.qmake.stash
+qt/moc_*
+qt/ui_*
+qt/qrc_*
+qt/qt_gateway
