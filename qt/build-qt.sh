@@ -14,6 +14,7 @@ make -j"${JOBS:-2}"
 file qt_gateway
 
 if [[ "${1:-}" == "--deploy" ]]; then
-    scp qt_gateway "${BOARD_USER}@${BOARD_IP}:/tmp/qt_gateway"
-    ssh "${BOARD_USER}@${BOARD_IP}" 'chmod +x /tmp/qt_gateway && /tmp/qt_gateway 127.0.0.1 -platform linuxfb'
+    ssh "${BOARD_USER}@${BOARD_IP}" 'mkdir -p /root/qtapp'
+    scp qt_gateway run.sh "${BOARD_USER}@${BOARD_IP}:/root/qtapp/"
+    ssh "${BOARD_USER}@${BOARD_IP}" 'chmod +x /root/qtapp/qt_gateway /root/qtapp/run.sh'
 fi
