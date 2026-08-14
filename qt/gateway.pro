@@ -1,8 +1,9 @@
-QT       += core gui
+QT       += core gui widgets network
 
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 
-CONFIG += c++11
+CONFIG += c++14
+TARGET = qt_gateway
 
 # The following define makes your compiler emit warnings if you use
 # any Qt feature that has been marked deprecated (the exact warnings
@@ -17,16 +18,12 @@ DEFINES += QT_DEPRECATED_WARNINGS
 
 SOURCES += \
     main.cpp \
-    statusbar.cpp \
-    widget.cpp
+    widget.cpp \
+    gatewayclient.cpp
 
 HEADERS += \
-    statusbar.h \
-    widget.h
-
-FORMS += \
-    statusbar.ui \
-    widget.ui
+    widget.h \
+    gatewayclient.h
 
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin
