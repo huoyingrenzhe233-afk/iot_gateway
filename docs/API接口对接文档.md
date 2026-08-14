@@ -315,6 +315,8 @@ body["payload"] = payload;
 
 > 别名(`start/stop`、`record/start|stop`)是为兼容老师 project-plan.md 的接口名,两套名字行为完全一致,用哪套都行。
 
+> 💡 **启动接口是幂等的**:推流/录像已在运行时,再次调用启动接口返回 200 `{"ok":true,"message":"already running"}`(不会报错、不会重复起进程)——页面刷新后重复点"启动"、或双端一方已启动另一方再点,都不会再看到"启动失败"。
+
 **视频流地址**(推流启动后,前端 `<img>` 直接显示):
 ```
 http://<网关IP>:8080/?action=stream

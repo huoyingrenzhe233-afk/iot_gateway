@@ -635,6 +635,14 @@ static void request_handler(struct mg_connection *connect, int event,
         mg_http_reply(connect, 500, "Content-Type: application/json\r\n",
                       "{\"ok\":false,\"message\":\"start_stream failed\"}");
       }
+      else if (ctx->camera->stream_running())
+      {
+        // 幂等修复:已在推流时重复启动不再报 500。此前页面刷新后前端
+        // 状态清零、或双端(Qt/Web)一方已启动流,另一方再点"启动"会得到
+        // 500 并被前端误报为"视频流启动失败"(实际流一直正常)。
+        mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
+                      "{\"ok\":true,\"message\":\"already running\"}");
+      }
       else
       {
         bool ok = ctx->camera->start_stream();
@@ -676,6 +684,12 @@ static void request_handler(struct mg_connection *connect, int event,
       {
         mg_http_reply(connect, 500, "Content-Type: application/json\r\n",
                       "{\"ok\":false,\"message\":\"start_record failed\"}");
+      }
+      else if (ctx->camera->record_running())
+      {
+        // 幂等修复:已在录像时重复启动返回 200(同 start_stream)
+        mg_http_reply(connect, 200, "Content-Type: application/json\r\n",
+                      "{\"ok\":true,\"message\":\"already recording\"}");
       }
       else
       {

@@ -721,6 +721,18 @@ function setMotorDirUser(dir) {
             if (d.transport) updateChannelBtn(d.transport);
         }).catch(() => {});
 
+        // 启动时同步摄像头状态:页面刷新后 streamStarted/recordStarted 会清零,
+        // 但网关侧的推流/录像可能还在跑——若不同步,用户再点"启动"会被网关
+        // 拒绝并误报"启动失败"。这里把按钮状态对齐真实状态。
+        fetch('/api/camera/status').then(r => r.json()).then(d => {
+            streamStarted = !!d.running;
+            recordStarted = !!d.recording;
+            streamStartBtn.disabled = streamStarted;
+            streamStopBtn.disabled = !streamStarted;
+            recordBtn.innerHTML = recordStarted ? '⏹ 停止录制' : '🔴 视频录制';
+            if (d.running) addLog('📹 视频流已在运行(已同步状态)');
+        }).catch(() => {});
+
         // 初始化日志
         addLog('[系统] 页面加载完成，设备控制就绪');
     </script>
