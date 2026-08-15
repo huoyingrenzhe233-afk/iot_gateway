@@ -30,11 +30,24 @@ Widget::Widget(const QString &host, QWidget *parent)
     : QWidget(parent),
       client_(new GatewayClient(host, this)),
       wsClient_(new WsClient(host, this)),
+      sensorFreshTimer_(new QTimer(this)),
       streamReply_(nullptr),
       viewing_(false),
       recording_(false),
       motorDirection_(0)
 {
+    sensorFreshTimer_->setSingleShot(true);
+    connect(sensorFreshTimer_, &QTimer::timeout, this, [this]() {
+        const QString style = QStringLiteral("color:#94a3b8;font-size:11px;");
+        const QString text = QStringLiteral("上次更新: %1").arg(lastSensorTimestamp_);
+        for (QLabel *label : {tempTimeLabel_, humiTimeLabel_, lightTimeLabel_, irTimeLabel_}) {
+            label->setStyleSheet(style);
+            label->setText(text);
+            label->show();
+        }
+        for (QLabel *dot : {tempFreshDot_, humiFreshDot_, lightFreshDot_, irFreshDot_}) dot->hide();
+    });
+
     setWindowTitle(QStringLiteral("RK3568 智能网关控制系统"));
     resize(1200, 800);
     setMinimumSize(900, 600);
@@ -106,26 +119,53 @@ Widget::Widget(const QString &host, QWidget *parent)
     humiLabel_ = new QLabel(QStringLiteral("--"), this);
     lightLabel_ = new QLabel(QStringLiteral("--"), this);
     irLabel_ = new QLabel(QStringLiteral("--"), this);
-    const QList<QPair<QString, QLabel *>> sensorLabels{
-        {QStringLiteral("温度\n°C"), tempLabel_},
-        {QStringLiteral("湿度\n% RH"), humiLabel_},
-        {QStringLiteral("光照强度\nLux"), lightLabel_},
-        {QStringLiteral("红外检测\nStatus"), irLabel_}};
+    tempTimeLabel_ = new QLabel(QStringLiteral("上次更新: --:--:--"), this);
+    humiTimeLabel_ = new QLabel(QStringLiteral("上次更新: --:--:--"), this);
+    lightTimeLabel_ = new QLabel(QStringLiteral("上次更新: --:--:--"), this);
+    irTimeLabel_ = new QLabel(QStringLiteral("上次更新: --:--:--"), this);
+    tempFreshDot_ = new QLabel(this);
+    humiFreshDot_ = new QLabel(this);
+    lightFreshDot_ = new QLabel(this);
+    irFreshDot_ = new QLabel(this);
+    struct SensorEntry {
+        QString title;
+        QLabel *valueLabel;
+        QLabel *timeLabel;
+    };
+    const QList<SensorEntry> sensorLabels{
+        {QStringLiteral("温度\n°C"), tempLabel_, tempTimeLabel_},
+        {QStringLiteral("湿度\n% RH"), humiLabel_, humiTimeLabel_},
+        {QStringLiteral("光照强度\nLux"), lightLabel_, lightTimeLabel_},
+        {QStringLiteral("红外检测\nStatus"), irLabel_, irTimeLabel_}};
     for (const auto &entry : sensorLabels) {
         auto *box = new QWidget(this);
         box->setStyleSheet(cardStyle);
         auto *layout = new QVBoxLayout(box);
         layout->setAlignment(Qt::AlignCenter);
-        auto *name = new QLabel(entry.first.section('\n', 0, 0), box);
+        auto *name = new QLabel(entry.title.section('\n', 0, 0), box);
         name->setAlignment(Qt::AlignCenter);
-        auto *unit = new QLabel(entry.first.section('\n', 1, 1), box);
+        auto *unit = new QLabel(entry.title.section('\n', 1, 1), box);
         unit->setAlignment(Qt::AlignCenter);
         unit->setStyleSheet(QStringLiteral("color:#94a3b8;font-size:12px;"));
-        entry.second->setAlignment(Qt::AlignCenter);
-        entry.second->setStyleSheet(QStringLiteral("color:#5c67f2;font-size:22px;font-weight:800;"));
+        entry.valueLabel->setAlignment(Qt::AlignCenter);
+        entry.valueLabel->setStyleSheet(QStringLiteral("color:#5c67f2;font-size:22px;font-weight:800;"));
+        entry.timeLabel->setAlignment(Qt::AlignCenter);
+        entry.timeLabel->setStyleSheet(QStringLiteral("color:#94a3b8;font-size:11px;"));
+        QLabel *dot = nullptr;
+        if (entry.valueLabel == tempLabel_) dot = tempFreshDot_;
+        else if (entry.valueLabel == humiLabel_) dot = humiFreshDot_;
+        else if (entry.valueLabel == lightLabel_) dot = lightFreshDot_;
+        else dot = irFreshDot_;
+        dot->setParent(box);
+        dot->setFixedSize(8, 8);
+        dot->setStyleSheet(QStringLiteral("background:transparent;border-radius:4px;"));
+        dot->move(10, 10);
+        dot->hide();
+        dot->raise();
         layout->addWidget(name);
-        layout->addWidget(entry.second);
+        layout->addWidget(entry.valueLabel);
         layout->addWidget(unit);
+        layout->addWidget(entry.timeLabel);
         sensors->addWidget(box);
     }
     left->addLayout(sensors);
@@ -367,6 +407,20 @@ void Widget::updateStatus(const QJsonObject &status)
     if (!ledBrightness_->hasFocus()) ledBrightness_->setValue(status.value(QStringLiteral("led_br")).toInt(50));
     if (!motorSpeed_->hasFocus()) motorSpeed_->setValue(status.value(QStringLiteral("motor_sp")).toInt(30));
     motorDirection_ = status.value(QStringLiteral("motor_dir")).toInt();
+    lastSensorTimestamp_ = QTime::currentTime().toString(QStringLiteral("HH:mm:ss"));
+    const QString style = QStringLiteral("color:#94a3b8;font-size:11px;");
+    const QString text = QStringLiteral("上次更新: %1").arg(lastSensorTimestamp_);
+    for (QLabel *label : {tempTimeLabel_, humiTimeLabel_, lightTimeLabel_, irTimeLabel_}) {
+        label->setStyleSheet(style);
+        label->setText(text);
+        label->hide();
+    }
+    for (QLabel *dot : {tempFreshDot_, humiFreshDot_, lightFreshDot_, irFreshDot_}) {
+        dot->setStyleSheet(QStringLiteral("background:#10b981;border-radius:4px;"));
+        dot->show();
+        dot->raise();
+    }
+    sensorFreshTimer_->start(2000);
 }
 
 void Widget::appendLog(const QString &message)
