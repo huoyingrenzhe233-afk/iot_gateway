@@ -665,11 +665,41 @@ function setMotorDirUser(dir) {
         let freshTimer = null;
         const sensorTimeIds = ['time_temp', 'time_humi', 'time_light', 'time_ir'];
         const sensorDotIds = ['dot_temp', 'dot_humi', 'dot_light', 'dot_ir'];
-        function getLocalTimeString() {
-            const now = new Date();
-            return [now.getHours(), now.getMinutes(), now.getSeconds()]
+        function getLocalTimeString(date = new Date()) {
+            return [date.getHours(), date.getMinutes(), date.getSeconds()]
                 .map(value => String(value).padStart(2, '0'))
                 .join(':');
+        }
+
+        // last_report 是网关本地时间,不带时区;严格解析后再判断新鲜度。
+        function parseLocalReportTimestamp(value) {
+            if (typeof value !== 'string') return null;
+            const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/.exec(value);
+            if (!match) return null;
+
+            const [year, month, day, hour, minute, second] = match.slice(1).map(Number);
+            if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) {
+                return null;
+            }
+
+            const timestamp = new Date(0);
+            timestamp.setFullYear(year, month - 1, day);
+            timestamp.setHours(hour, minute, second, 0);
+            if (timestamp.getFullYear() !== year || timestamp.getMonth() !== month - 1 ||
+                timestamp.getDate() !== day || timestamp.getHours() !== hour ||
+                timestamp.getMinutes() !== minute || timestamp.getSeconds() !== second) {
+                return null;
+            }
+            return timestamp;
+        }
+
+        function getLastReportFreshness(lastReport, now) {
+            const reportedAt = parseLocalReportTimestamp(lastReport);
+            if (!reportedAt) return { fresh: false, time: '--:--:--', ageMs: Infinity };
+
+            // Future reports are treated as current rather than becoming stale.
+            const ageMs = Math.max(0, now.getTime() - reportedAt.getTime());
+            return { fresh: ageMs <= 5000, time: getLocalTimeString(reportedAt), ageMs };
         }
 
         setInterval(() => {
@@ -701,20 +731,28 @@ function setMotorDirUser(dir) {
                 document.getElementById('conn_status').innerText = "● 设备在线";
                 document.getElementById('conn_status').style.color = "#fff";
 
-                const updatedAt = `上次更新: ${getLocalTimeString()}`;
+                if (freshTimer) {
+                    clearTimeout(freshTimer);
+                    freshTimer = null;
+                }
+                const hasLastReport = Object.prototype.hasOwnProperty.call(data, 'last_report');
+                const freshness = hasLastReport
+                    ? getLastReportFreshness(data.last_report, new Date())
+                    : { fresh: true, time: getLocalTimeString(), ageMs: 0 };
                 sensorTimeIds.forEach(id => {
                     const timeEl = document.getElementById(id);
-                    timeEl.innerText = updatedAt;
-                    timeEl.classList.add('fresh');
+                    timeEl.innerText = `上次更新: ${freshness.time}`;
+                    timeEl.classList.toggle('fresh', freshness.fresh);
                 });
                 sensorDotIds.forEach(id => {
-                    document.getElementById(id).classList.add('fresh');
+                    document.getElementById(id).classList.toggle('fresh', freshness.fresh);
                 });
-                if (freshTimer) clearTimeout(freshTimer);
-                freshTimer = setTimeout(() => {
-                    sensorDotIds.forEach(id => document.getElementById(id).classList.remove('fresh'));
-                    sensorTimeIds.forEach(id => document.getElementById(id).classList.remove('fresh'));
-                }, 2000);
+                if (freshness.fresh) {
+                    freshTimer = setTimeout(() => {
+                        sensorDotIds.forEach(id => document.getElementById(id).classList.remove('fresh'));
+                        sensorTimeIds.forEach(id => document.getElementById(id).classList.remove('fresh'));
+                    }, hasLastReport ? Math.max(0, 5000 - freshness.ageMs) : 2000);
+                }
             }).catch(e => {
                 document.getElementById('conn_status').innerText = "● 连接断开";
                 document.getElementById('conn_status').style.color = "#ff4d4d";

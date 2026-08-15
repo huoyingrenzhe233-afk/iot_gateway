@@ -36,17 +36,9 @@ Widget::Widget(const QString &host, QWidget *parent)
       recording_(false),
       motorDirection_(0)
 {
-    sensorFreshTimer_->setSingleShot(true);
-    connect(sensorFreshTimer_, &QTimer::timeout, this, [this]() {
-        const QString style = QStringLiteral("color:#94a3b8;font-size:11px;");
-        const QString text = QStringLiteral("上次更新: %1").arg(lastSensorTimestamp_);
-        for (QLabel *label : {tempTimeLabel_, humiTimeLabel_, lightTimeLabel_, irTimeLabel_}) {
-            label->setStyleSheet(style);
-            label->setText(text);
-            label->show();
-        }
-        for (QLabel *dot : {tempFreshDot_, humiFreshDot_, lightFreshDot_, irFreshDot_}) dot->hide();
-    });
+    sensorFreshTimer_->setInterval(1000);
+    connect(sensorFreshTimer_, &QTimer::timeout, this, &Widget::refreshSensorFreshness);
+    sensorFreshTimer_->start();
 
     setWindowTitle(QStringLiteral("RK3568 智能网关控制系统"));
     resize(1200, 800);
@@ -407,20 +399,51 @@ void Widget::updateStatus(const QJsonObject &status)
     if (!ledBrightness_->hasFocus()) ledBrightness_->setValue(status.value(QStringLiteral("led_br")).toInt(50));
     if (!motorSpeed_->hasFocus()) motorSpeed_->setValue(status.value(QStringLiteral("motor_sp")).toInt(30));
     motorDirection_ = status.value(QStringLiteral("motor_dir")).toInt();
-    lastSensorTimestamp_ = QTime::currentTime().toString(QStringLiteral("HH:mm:ss"));
+
+    // 新鲜度:优先用后端 last_report(yyyy-MM-dd HH:mm:ss,本地时间);
+    // 字段存在但为空/解析失败 → 灰色;字段缺失(旧后端) → 轮询时间兜底。
+    if (status.contains(QStringLiteral("last_report"))) {
+        lastReportTime_ = QDateTime::fromString(
+            status.value(QStringLiteral("last_report")).toString(), QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+        if (lastReportTime_.isValid()) {
+            lastSensorTimestamp_ = lastReportTime_.toString(QStringLiteral("HH:mm:ss"));
+        }
+    } else {
+        // 旧后端无 last_report 字段:沿用轮询到的本地时间
+        lastReportTime_ = QDateTime::currentDateTime();
+        lastSensorTimestamp_ = QTime::currentTime().toString(QStringLiteral("HH:mm:ss"));
+    }
+    refreshSensorFreshness();
+}
+
+void Widget::refreshSensorFreshness()
+{
+    // 新鲜判定:last_report 在 5 秒内视为新鲜;未来时间戳(负年龄)也按新鲜处理
+    const qint64 ageMs = lastReportTime_.msecsTo(QDateTime::currentDateTime());
+    const bool fresh = lastReportTime_.isValid() && ageMs <= 5000;
+
     const QString style = QStringLiteral("color:#94a3b8;font-size:11px;");
-    const QString text = QStringLiteral("上次更新: %1").arg(lastSensorTimestamp_);
-    for (QLabel *label : {tempTimeLabel_, humiTimeLabel_, lightTimeLabel_, irTimeLabel_}) {
-        label->setStyleSheet(style);
-        label->setText(text);
-        label->hide();
+    if (fresh) {
+        for (QLabel *label : {tempTimeLabel_, humiTimeLabel_, lightTimeLabel_, irTimeLabel_}) {
+            label->setStyleSheet(style);
+            label->setText(QStringLiteral("上次更新: %1").arg(lastSensorTimestamp_));
+            label->hide();
+        }
+        for (QLabel *dot : {tempFreshDot_, humiFreshDot_, lightFreshDot_, irFreshDot_}) {
+            dot->setStyleSheet(QStringLiteral("background:#10b981;border-radius:4px;"));
+            dot->show();
+            dot->raise();
+        }
+    } else {
+        const QString text = QStringLiteral("上次更新: %1").arg(
+            lastSensorTimestamp_.isEmpty() ? QStringLiteral("--:--:--") : lastSensorTimestamp_);
+        for (QLabel *label : {tempTimeLabel_, humiTimeLabel_, lightTimeLabel_, irTimeLabel_}) {
+            label->setStyleSheet(style);
+            label->setText(text);
+            label->show();
+        }
+        for (QLabel *dot : {tempFreshDot_, humiFreshDot_, lightFreshDot_, irFreshDot_}) dot->hide();
     }
-    for (QLabel *dot : {tempFreshDot_, humiFreshDot_, lightFreshDot_, irFreshDot_}) {
-        dot->setStyleSheet(QStringLiteral("background:#10b981;border-radius:4px;"));
-        dot->show();
-        dot->raise();
-    }
-    sensorFreshTimer_->start(2000);
 }
 
 void Widget::appendLog(const QString &message)

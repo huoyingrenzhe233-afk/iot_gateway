@@ -191,13 +191,14 @@ value 不是数字       → 400 {"error":"invalid value"}
 
 ### 7.4 `GET /api/status` — 设备状态聚合(轮询核心接口)
 
-一次返回 11 个字段:4 传感器测量值 + 6 执行器状态 + 1 个 `transport` 通道字段。**前端/Qt 每 1 秒轮询这个接口刷新界面**。
+一次返回 12 个字段:4 传感器测量值 + 6 执行器状态 + 1 个 `last_report` 上报时间 + 1 个 `transport` 通道字段。**前端/Qt 每 1 秒轮询这个接口刷新界面**。
 
 ```
 请求: GET http://<网关IP>:8081/api/status
 响应 200:
 {"temp":"25.5","humi":"60.1","light":"320","ir":"2500",
  "led_on":1,"led_br":80,"motor_on":0,"motor_sp":0,"motor_dir":0,"buzzer":0,
+ "last_report":"2026-08-15 10:00:00",
  "transport":"mqtt"}
 ```
 
@@ -208,6 +209,7 @@ value 不是数字       → 400 {"error":"invalid value"}
 | `led_br` `motor_sp` | int | 0-100 PWM |
 | `motor_on` | int | 0/1 |
 | `motor_dir` | int | 0 正转 / 1 反转 |
+| `last_report` | string | 最近一次上报时间(空串 `""` = 从未收到上报);来源 `Device::last_seen_` |
 | `transport` | string | 当前通信通道(`mqtt`/`zigbee`);通道切换按钮状态可直接读它 |
 
 未收到过上报时,传感器字段为空字符串 `""`。

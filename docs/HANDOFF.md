@@ -228,7 +228,7 @@ API 清单:`/api/health` `/api/version` `/api/devices` `/api/actuators/:id/set` 
 - ✅ `src/core/device/device.{h,cpp}`:6 外设状态缓存
   - `update_from_report`:解析 sensor 上报(4 传感器)+ status 回执(items 数组,长短名兼容)
   - `update_from_control`:控制命令缓存(UI 秒响应,回执校准;支持部分字段下发)
-  - `get_status_json`:/api/status 的 10 字段聚合(4 传感器字符串 + 6 执行器数值)
+  - `get_status_json`:/api/status 的 11 字段聚合(4 传感器字符串 + 6 执行器数值 + last_report 上报时间)
 - ✅ `src/core/device/device_registry.{h,cpp}`:静态登记表,读 config/devices/*.yaml
   - sensors.yaml(4 传感器:temp_1/humi_1/light_1/ir_1)+ actuators.yaml(3 执行器:led_1/motor_1/buzzer_1)
   - `json_escape` 转义 + `kind` 校验(sensor/actuator)

@@ -58,9 +58,10 @@ namespace gateway
         //   {"type":"cmd","dev":"mcu01","ts":"...","body":{"led_on":1,"led_br":80,"motor_on":0,"motor_sp":0,"motor_dir":0,"buzzer":0}}
         void update_from_control(const std::string &envelope);
 
-        // 生成 /api/status 的聚合 JSON(10 字段)
+        // 生成 /api/status 的聚合 JSON(11 字段)
         // 返回:{"temp":"25.5","humi":"60.0","light":"500","ir":"2500",
-        //        "led_on":1,"led_br":80,"motor_on":1,"motor_sp":50,"motor_dir":0,"buzzer":0}
+        //        "led_on":1,"led_br":80,"motor_on":1,"motor_sp":50,"motor_dir":0,"buzzer":0,
+        //        "last_report":"2026-08-15 10:00:00"}(last_report 空串=从未上报)
         std::string get_status_json() const;
 
         // 设备在线状态(最近上报时间,空=从未上报)
