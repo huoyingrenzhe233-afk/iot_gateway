@@ -134,7 +134,22 @@ Widget::Widget(const QString &host, QWidget *parent)
     auto *right = new QVBoxLayout();
     right->setSpacing(20);
     auto *control = new QWidget(this);
-    control->setStyleSheet(cardStyle);
+    control->setStyleSheet(cardStyle + QStringLiteral(
+        "QCheckBox{spacing:10px;min-height:40px;color:#1f2937;}"
+        "QCheckBox::indicator{width:28px;height:28px;border:2px solid #94a3b8;"
+        "border-radius:7px;background:#f8fafc;}"
+        "QCheckBox::indicator:hover{border-color:#6366f1;background:#eef2ff;}"
+        "QCheckBox::indicator:checked{border-color:#4f46e5;background:#4f46e5;}"
+        "QCheckBox::indicator:disabled{border-color:#cbd5e1;background:#e2e8f0;}"
+        "QSlider{min-height:36px;}"
+        "QSlider::groove:horizontal{height:8px;border-radius:4px;background:#e2e8f0;}"
+        "QSlider::sub-page:horizontal{border-radius:4px;background:#5c67f2;}"
+        "QSlider::add-page:horizontal{border-radius:4px;background:#e2e8f0;}"
+        "QSlider::handle:horizontal{width:28px;height:28px;margin:-10px 0;"
+        "border:3px solid #ffffff;border-radius:14px;background:#4f46e5;}"
+        "QSlider::handle:horizontal:hover{background:#4338ca;}"
+        "QSlider::handle:horizontal:pressed{background:#3730a3;}"
+        "QSlider::handle:horizontal:disabled{background:#cbd5e1;}"));
     auto *controlLayout = new QVBoxLayout(control);
     auto *controlTitle = new QLabel(QStringLiteral("硬件外设控制"), control);
     controlTitle->setStyleSheet(QStringLiteral("font-size:17px;font-weight:700;"));
@@ -162,11 +177,19 @@ Widget::Widget(const QString &host, QWidget *parent)
     auto *directions = new QHBoxLayout();
     forwardButton_ = new QPushButton(QStringLiteral("正向旋转"), control);
     reverseButton_ = new QPushButton(QStringLiteral("反向旋转"), control);
+    forwardButton_->setStyleSheet(buttonStyle + QStringLiteral(
+        "QPushButton{background:#4f46e5;min-height:42px;}"
+        "QPushButton:hover{background:#4338ca;}"
+        "QPushButton:pressed{background:#3730a3;}"));
+    reverseButton_->setStyleSheet(buttonStyle + QStringLiteral(
+        "QPushButton{background:#64748b;min-height:42px;}"
+        "QPushButton:hover{background:#475569;}"
+        "QPushButton:pressed{background:#334155;}"));
     directions->addWidget(forwardButton_);
     directions->addWidget(reverseButton_);
     controlLayout->addLayout(directions);
     addSwitch(QStringLiteral("紧急蜂鸣报警"), &buzzerSwitch_);
-    right->addWidget(control);
+    right->addWidget(control, 1);
 
     auto *logCard = new QWidget(this);
     logCard->setStyleSheet(cardStyle);
