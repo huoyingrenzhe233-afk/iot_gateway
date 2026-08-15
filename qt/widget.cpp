@@ -55,7 +55,7 @@ Widget::Widget(const QString &host, QWidget *parent)
     title->setStyleSheet(QStringLiteral("font-size:20px;font-weight:800;color:white;"));
     headerLayout->addWidget(title);
     headerLayout->addStretch();
-    channelButton_ = new QPushButton(QStringLiteral("📡 通道:MQTT"), header);
+    channelButton_ = new QPushButton(QStringLiteral("通道:MQTT"), header);
     channelButton_->setStyleSheet(QStringLiteral(
         "QPushButton{background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.4);"
         "border-radius:8px;padding:6px 14px;color:white;}"));
@@ -75,7 +75,7 @@ Widget::Widget(const QString &host, QWidget *parent)
     auto *videoCard = new QWidget(this);
     videoCard->setStyleSheet(cardStyle);
     auto *videoLayout = new QVBoxLayout(videoCard);
-    auto *videoTitle = new QLabel(QStringLiteral("🎥  实时画面监控"), videoCard);
+    auto *videoTitle = new QLabel(QStringLiteral("实时画面监控"), videoCard);
     videoTitle->setStyleSheet(QStringLiteral("font-size:17px;font-weight:700;"));
     videoLayout->addWidget(videoTitle);
     videoLabel_ = new QLabel(QStringLiteral("视频未开启"), videoCard);
@@ -85,10 +85,10 @@ Widget::Widget(const QString &host, QWidget *parent)
         "background:#000000;color:#94a3b8;border:4px solid white;border-radius:12px;"));
     videoLayout->addWidget(videoLabel_, 1);
     auto *videoButtons = new QHBoxLayout();
-    viewStartButton_ = new QPushButton(QStringLiteral("▶ 开始视频"), videoCard);
-    viewStopButton_ = new QPushButton(QStringLiteral("⏹ 停止视频"), videoCard);
-    auto *snapshotButton = new QPushButton(QStringLiteral("📸 抓拍照片"), videoCard);
-    recordButton_ = new QPushButton(QStringLiteral("🔴 视频录制"), videoCard);
+    viewStartButton_ = new QPushButton(QStringLiteral("开始视频"), videoCard);
+    viewStopButton_ = new QPushButton(QStringLiteral("停止视频"), videoCard);
+    auto *snapshotButton = new QPushButton(QStringLiteral("抓拍照片"), videoCard);
+    recordButton_ = new QPushButton(QStringLiteral("视频录制"), videoCard);
     viewStartButton_->setStyleSheet(buttonStyle + QStringLiteral("QPushButton{background:#3b82f6;}"));
     viewStopButton_->setStyleSheet(buttonStyle + QStringLiteral("QPushButton{background:#64748b;}"));
     snapshotButton->setStyleSheet(buttonStyle + QStringLiteral("QPushButton{background:#10b981;}"));
@@ -136,7 +136,7 @@ Widget::Widget(const QString &host, QWidget *parent)
     auto *control = new QWidget(this);
     control->setStyleSheet(cardStyle);
     auto *controlLayout = new QVBoxLayout(control);
-    auto *controlTitle = new QLabel(QStringLiteral("⚙️  硬件外设控制"), control);
+    auto *controlTitle = new QLabel(QStringLiteral("硬件外设控制"), control);
     controlTitle->setStyleSheet(QStringLiteral("font-size:17px;font-weight:700;"));
     controlLayout->addWidget(controlTitle);
     auto addSwitch = [control, controlLayout](const QString &name, QCheckBox **target) {
@@ -171,7 +171,7 @@ Widget::Widget(const QString &host, QWidget *parent)
     auto *logCard = new QWidget(this);
     logCard->setStyleSheet(cardStyle);
     auto *logLayout = new QVBoxLayout(logCard);
-    auto *logTitle = new QLabel(QStringLiteral("📜  系统运行日志"), logCard);
+    auto *logTitle = new QLabel(QStringLiteral("系统运行日志"), logCard);
     logTitle->setStyleSheet(QStringLiteral("font-size:17px;font-weight:700;"));
     logLayout->addWidget(logTitle);
     logBox_ = new QPlainTextEdit(logCard);
@@ -208,21 +208,21 @@ Widget::Widget(const QString &host, QWidget *parent)
     });
     connect(client_, &GatewayClient::channelReceived, this, [this](const QString &transport) {
         channelButton_->setText(transport == QStringLiteral("zigbee")
-                                    ? QStringLiteral("📡 通道:ZigBee")
-                                    : QStringLiteral("📡 通道:MQTT"));
+                                     ? QStringLiteral("通道:ZigBee")
+                                     : QStringLiteral("通道:MQTT"));
     });
     connect(client_, &GatewayClient::cameraStatusReceived, this, [this](bool running, bool recording) {
         recording_ = recording;
-        recordButton_->setText(recording ? QStringLiteral("⏹ 停止录制") : QStringLiteral("🔴 视频录制"));
-        if (running) appendLog(QStringLiteral("📹 视频流已就绪，点开始视频观看"));
+        recordButton_->setText(recording ? QStringLiteral("停止录制") : QStringLiteral("视频录制"));
+        if (running) appendLog(QStringLiteral("视频流已就绪，点开始视频观看"));
     });
     connect(wsClient_, &WsClient::mqttMessage, this, [this](const QString &topic, const QString &payload) {
-        appendLog(QStringLiteral("📡 MQTT %1: %2").arg(topic, payload));
+        appendLog(QStringLiteral("MQTT %1: %2").arg(topic, payload));
     });
     connect(wsClient_, &WsClient::channelChanged, this, [this](const QString &transport) {
         channelButton_->setText(transport == QStringLiteral("zigbee")
-                                    ? QStringLiteral("📡 通道:ZigBee")
-                                    : QStringLiteral("📡 通道:MQTT"));
+                                     ? QStringLiteral("通道:ZigBee")
+                                     : QStringLiteral("通道:MQTT"));
     });
     connect(wsClient_, &WsClient::logMessage, this, &Widget::appendLog);
     connect(client_, &GatewayClient::streamReady, this, [this, host]() {
@@ -265,7 +265,7 @@ void Widget::stopViewing()
     videoLabel_->setText(QStringLiteral("视频已停止"));
     viewStartButton_->setEnabled(true);
     viewStopButton_->setEnabled(false);
-    appendLog(QStringLiteral("⏹ 已停止观看(不影响其他端的画面)"));
+    appendLog(QStringLiteral("已停止观看(不影响其他端的画面)"));
 }
 
 void Widget::onStreamData()
@@ -300,7 +300,7 @@ void Widget::toggleRecord()
     if (recording_) client_->stopRecord();
     else client_->startRecord();
     recording_ = !recording_;
-    recordButton_->setText(recording_ ? QStringLiteral("⏹ 停止录制") : QStringLiteral("🔴 视频录制"));
+    recordButton_->setText(recording_ ? QStringLiteral("停止录制") : QStringLiteral("视频录制"));
 }
 
 void Widget::setMotorDirection(bool reverse)
