@@ -1,4 +1,5 @@
 #include "core/device/device.h"
+#include "core/common/json_util.h"    // json_escape(与 device_registry 共用)
 #include "core/common/logger/logger.h"
 
 #include <cstdio>
@@ -189,8 +190,9 @@ namespace gateway
     }
 
     // ------------------------------------------------------------
-    // get_status_json:生成 /api/status 聚合 JSON(10 字段)
-    // 传感器值用字符串(协议约定),执行器状态用数值
+    // get_status_json:生成 /api/status 聚合 JSON(11 字段)
+    // 传感器值用字符串(协议约定),执行器状态用数值,
+    // last_report 附最后上报时间(JSON 转义,空=从未上报)
     // ------------------------------------------------------------
     std::string Device::get_status_json() const
     {
@@ -217,7 +219,12 @@ namespace gateway
         out += std::to_string(actuators_.motor_dir);
         out += ",\"buzzer\":";
         out += std::to_string(actuators_.buzzer);
-        out += "}";
+        // 真实新鲜度:最近一次上报时间(update_from_report 已从 $.ts 写入
+        // last_seen_)。走 json_escape 防 ts 里的引号/反斜杠破坏 JSON;
+        // 从未上报时 last_seen_ 为空串,这里输出 "" 而不是 null/省略。
+        out += ",\"last_report\":\"";
+        out += json_escape(last_seen_);
+        out += "\"}";
         return out;
     }
 }

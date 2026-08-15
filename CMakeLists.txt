@@ -51,4 +51,27 @@ if(NOT CMAKE_CROSSCOMPILING)
             "${CMAKE_BINARY_DIR}/compile_commands.json"
             "${CMAKE_SOURCE_DIR}/compile_commands.json"
         COMMENT "Copying compile_commands.json to source root (for clangd auto-discovery)")
+
+    # ------------------------------------------------------------
+    # 回归测试:get_status_json() 的 last_report 真实新鲜度字段
+    # 仅宿主机编译(交叉编译的板端不需要跑测试)。
+    # 依赖:device.cpp(JSON 解析用 mongoose)+ logger.cpp
+    # 运行:cmake --build build && (cd build && ctest --output-on-failure)
+    # ------------------------------------------------------------
+    enable_testing()
+    add_executable(test_device_status
+        tests/test_device_status.cpp
+        src/core/device/device.cpp
+        src/core/common/logger/logger.cpp
+        third_party/mongoose.c
+    )
+    target_include_directories(test_device_status PRIVATE
+        src
+        third_party
+    )
+    target_link_libraries(test_device_status PRIVATE
+        pthread
+        dl
+    )
+    add_test(NAME device_status_last_report COMMAND test_device_status)
 endif()

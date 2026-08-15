@@ -2,6 +2,7 @@
 #define WIDGET_H
 
 #include <QByteArray>
+#include <QDateTime>
 #include <QJsonObject>
 #include <QWidget>
 
@@ -35,11 +36,13 @@ private slots:
 
 private:
     void renderNextFrame();
+    void refreshSensorFreshness();
 
     GatewayClient *client_;
     WsClient *wsClient_;
     QTimer *sensorFreshTimer_;
     QString lastSensorTimestamp_;
+    QDateTime lastReportTime_;
     QNetworkReply *streamReply_;
     QByteArray streamBuffer_;
     bool viewing_;
