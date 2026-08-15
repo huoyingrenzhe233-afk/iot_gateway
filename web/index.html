@@ -283,6 +283,22 @@
             border-radius: 12px;
             text-align: center;
             box-shadow: 0 4px 6px rgba(0, 0, 0, 0.02);
+            position: relative;
+        }
+
+        .s-fresh-dot {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: transparent;
+        }
+
+        .s-fresh-dot.fresh {
+            background: var(--success);
+            box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.14);
         }
 
         .s-val {
@@ -296,6 +312,16 @@
             font-size: 12px;
             color: #94a3b8;
         }
+
+        .s-time {
+            font-size: 12px;
+            color: #94a3b8;
+        }
+
+        .s-time.fresh {
+            display: none;
+        }
+
     </style>
 </head>
 
@@ -331,24 +357,32 @@
 
             <div class="sensor-row">
                 <div class="s-card">
+                    <span class="s-fresh-dot" id="dot_temp" aria-label="状态实时更新"></span>
                     <div>温度</div>
                     <div class="s-val" id="val_temp">--</div>
                     <div class="s-unit">°C</div>
+                    <div class="s-time" id="time_temp">上次更新: --:--:--</div>
                 </div>
                 <div class="s-card">
+                    <span class="s-fresh-dot" id="dot_humi" aria-label="状态实时更新"></span>
                     <div>湿度</div>
                     <div class="s-val" id="val_humi">--</div>
                     <div class="s-unit">% RH</div>
+                    <div class="s-time" id="time_humi">上次更新: --:--:--</div>
                 </div>
                 <div class="s-card">
+                    <span class="s-fresh-dot" id="dot_light" aria-label="状态实时更新"></span>
                     <div>光照强度</div>
                     <div class="s-val" id="val_light">--</div>
                     <div class="s-unit">Lux</div>
+                    <div class="s-time" id="time_light">上次更新: --:--:--</div>
                 </div>
                 <div class="s-card">
+                    <span class="s-fresh-dot" id="dot_ir" aria-label="状态实时更新"></span>
                     <div>红外检测</div>
                     <div class="s-val" id="val_ir" style="font-size:16px;">--</div>
                     <div class="s-unit">Status</div>
+                    <div class="s-time" id="time_ir">上次更新: --:--:--</div>
                 </div>
             </div>
         </div>
@@ -628,6 +662,16 @@ function setMotorDirUser(dir) {
 
         // 定时拉取传感器数据(带 in-flight 保护,防响应慢时请求堆积乱序)
         let polling = false;
+        let freshTimer = null;
+        const sensorTimeIds = ['time_temp', 'time_humi', 'time_light', 'time_ir'];
+        const sensorDotIds = ['dot_temp', 'dot_humi', 'dot_light', 'dot_ir'];
+        function getLocalTimeString() {
+            const now = new Date();
+            return [now.getHours(), now.getMinutes(), now.getSeconds()]
+                .map(value => String(value).padStart(2, '0'))
+                .join(':');
+        }
+
         setInterval(() => {
             if (polling) return; // 上一次还没返回,跳过本次
             polling = true;
@@ -656,6 +700,21 @@ function setMotorDirUser(dir) {
                 // 恢复连接状态
                 document.getElementById('conn_status').innerText = "● 设备在线";
                 document.getElementById('conn_status').style.color = "#fff";
+
+                const updatedAt = `上次更新: ${getLocalTimeString()}`;
+                sensorTimeIds.forEach(id => {
+                    const timeEl = document.getElementById(id);
+                    timeEl.innerText = updatedAt;
+                    timeEl.classList.add('fresh');
+                });
+                sensorDotIds.forEach(id => {
+                    document.getElementById(id).classList.add('fresh');
+                });
+                if (freshTimer) clearTimeout(freshTimer);
+                freshTimer = setTimeout(() => {
+                    sensorDotIds.forEach(id => document.getElementById(id).classList.remove('fresh'));
+                    sensorTimeIds.forEach(id => document.getElementById(id).classList.remove('fresh'));
+                }, 2000);
             }).catch(e => {
                 document.getElementById('conn_status').innerText = "● 连接断开";
                 document.getElementById('conn_status').style.color = "#ff4d4d";

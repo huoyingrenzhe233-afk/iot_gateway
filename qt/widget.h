@@ -11,6 +11,7 @@ class QNetworkReply;
 class QPlainTextEdit;
 class QPushButton;
 class QSlider;
+class QTimer;
 class GatewayClient;
 class WsClient;
 
@@ -37,6 +38,8 @@ private:
 
     GatewayClient *client_;
     WsClient *wsClient_;
+    QTimer *sensorFreshTimer_;
+    QString lastSensorTimestamp_;
     QNetworkReply *streamReply_;
     QByteArray streamBuffer_;
     bool viewing_;
@@ -52,6 +55,14 @@ private:
     QLabel *humiLabel_;
     QLabel *lightLabel_;
     QLabel *irLabel_;
+    QLabel *tempTimeLabel_;
+    QLabel *humiTimeLabel_;
+    QLabel *lightTimeLabel_;
+    QLabel *irTimeLabel_;
+    QLabel *tempFreshDot_;
+    QLabel *humiFreshDot_;
+    QLabel *lightFreshDot_;
+    QLabel *irFreshDot_;
     QCheckBox *ledSwitch_;
     QCheckBox *motorSwitch_;
     QCheckBox *buzzerSwitch_;
