@@ -37,10 +37,13 @@ private slots:
 private:
     void renderNextFrame();
     void refreshSensorFreshness();
+    void sendControlNow();
 
     GatewayClient *client_;
     WsClient *wsClient_;
     QTimer *sensorFreshTimer_;
+    QTimer *controlDebounceTimer_;
+    qint64 lastUserControlMs_ = 0;
     QString lastSensorTimestamp_;
     QDateTime lastReportTime_;
     QNetworkReply *streamReply_;

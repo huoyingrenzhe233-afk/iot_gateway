@@ -587,37 +587,68 @@
             }
         }
 
-      function cmd() {
-    const payload = {
-        led_on: document.getElementById('led_sw').checked ? 1 : 0,
-        led_br: parseInt(document.getElementById('led_br').value),
-        motor_on: document.getElementById('motor_sw').checked ? 1 : 0,
-        motor_sp: parseInt(document.getElementById('motor_sp').value),
-        motor_dir: currentDir,  
-        buzzer: document.getElementById('buzzer_sw').checked ? 1 : 0
-    };
+      // ========== 控制命令防抖与合并 ==========
+        // 问题:高频连点(开关/方向/滑块)时每次都会立即 POST /api/control,
+        // 单片机上报/回执约 2s 一条,命令风暴会让状态来回跳、界面"反应不过来"。
+        // 方案:
+        //   1. 防抖:200ms 内的连续操作合并成最后一条命令,只发一次
+        //   2. in-flight 合并:上一条还没返回时不发新请求,300ms 后以最新状态重试
+        //   3. 乐观保护:用户操作后 1.5s 内轮询不回写控件,避免刚点的值被拽回旧值
+        // 注意:最后发送的 payload 恒为"当前控件全量 6 字段",合并语义和安全语义一致。
+        let controlDebounceTimer = null;
+        let controlInFlight = false;
+        let lastUserControlAt = 0;
 
-    const msg = {
-        type: "control",
-        payload: payload
-    };
-
-    addLog(`发送指令: ${JSON.stringify(msg)}`);
-
-    fetch('/api/control', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(msg)
-    }).then(async res => {
-        if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            throw new Error(err.message || `HTTP ${res.status}`);
+        function markUserControl() {
+            lastUserControlAt = Date.now();
         }
-        return res.json();
-    }).catch(err => {
-        addLog(`❌ 指令发送失败: ${err.message}`);
-    });
-}
+
+        function shouldSkipPollWriteback() {
+            return Date.now() - lastUserControlAt < 1500;
+        }
+
+        function cmd() {
+            markUserControl();
+            if (controlDebounceTimer) clearTimeout(controlDebounceTimer);
+            controlDebounceTimer = setTimeout(() => {
+                if (controlInFlight) {
+                    // 上一条还没返回:300ms 后用最新控件状态再试(仍合并防抖)
+                    clearTimeout(controlDebounceTimer);
+                    controlDebounceTimer = setTimeout(sendControlNow, 300);
+                    return;
+                }
+                sendControlNow();
+            }, 200);
+        }
+
+        function sendControlNow() {
+            controlInFlight = true;
+            const payload = {
+                led_on: document.getElementById('led_sw').checked ? 1 : 0,
+                led_br: parseInt(document.getElementById('led_br').value),
+                motor_on: document.getElementById('motor_sw').checked ? 1 : 0,
+                motor_sp: parseInt(document.getElementById('motor_sp').value),
+                motor_dir: currentDir,
+                buzzer: document.getElementById('buzzer_sw').checked ? 1 : 0
+            };
+            const msg = { type: "control", payload: payload };
+            addLog(`发送指令: ${JSON.stringify(msg)}`);
+            fetch('/api/control', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(msg)
+            }).then(async res => {
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.message || `HTTP ${res.status}`);
+                }
+                return res.json();
+            }).catch(err => {
+                addLog(`❌ 指令发送失败: ${err.message}`);
+            }).finally(() => {
+                controlInFlight = false;
+            });
+        }
 
 
         function updateLed() {
@@ -720,12 +751,17 @@ function setMotorDirUser(dir) {
                 // 轮询返回会把滑杆"拽回去"(本地操作 vs 轮询竞态)
                 const ledBrEl = document.getElementById('led_br');
                 const motorSpEl = document.getElementById('motor_sp');
-                document.getElementById('led_sw').checked = data.led_on === 1;
-                if (document.activeElement !== ledBrEl) ledBrEl.value = data.led_br ?? 50;
-                document.getElementById('motor_sw').checked = data.motor_on === 1;
-                if (document.activeElement !== motorSpEl) motorSpEl.value = data.motor_sp ?? 30;
-                setMotorDirUI(data.motor_dir);
-                document.getElementById('buzzer_sw').checked = data.buzzer === 1;
+
+                // 乐观保护:用户刚操作过控件(1.5s 内),轮询不回写,
+                // 避免"刚点击/拖动就被旧缓存拽回"直到单片机回执更新。
+                if (!shouldSkipPollWriteback()) {
+                    document.getElementById('led_sw').checked = data.led_on === 1;
+                    if (document.activeElement !== ledBrEl) ledBrEl.value = data.led_br ?? 50;
+                    document.getElementById('motor_sw').checked = data.motor_on === 1;
+                    if (document.activeElement !== motorSpEl) motorSpEl.value = data.motor_sp ?? 30;
+                    setMotorDirUI(data.motor_dir);
+                    document.getElementById('buzzer_sw').checked = data.buzzer === 1;
+                }
 
                 // 恢复连接状态
                 document.getElementById('conn_status').innerText = "● 设备在线";

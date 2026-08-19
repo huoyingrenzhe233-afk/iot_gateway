@@ -31,6 +31,7 @@ Widget::Widget(const QString &host, QWidget *parent)
       client_(new GatewayClient(host, this)),
       wsClient_(new WsClient(host, this)),
       sensorFreshTimer_(new QTimer(this)),
+      controlDebounceTimer_(new QTimer(this)),
       streamReply_(nullptr),
       viewing_(false),
       recording_(false),
@@ -39,6 +40,12 @@ Widget::Widget(const QString &host, QWidget *parent)
     sensorFreshTimer_->setInterval(1000);
     connect(sensorFreshTimer_, &QTimer::timeout, this, &Widget::refreshSensorFreshness);
     sensorFreshTimer_->start();
+
+    // 控制命令防抖:滑块拖动会连续触发几十次 valueChanged,若每次都立即发送
+    // 会形成命令风暴压垮单片机(其上报/回执约 2s 一条)。改为 200ms 内合并,
+    // 只发送最后一次控件状态;上一条未返回时自动延迟重试。
+    controlDebounceTimer_->setSingleShot(true);
+    connect(controlDebounceTimer_, &QTimer::timeout, this, &Widget::sendControlNow);
 
     setWindowTitle(QStringLiteral("RK3568 智能网关控制系统"));
     resize(1200, 800);
@@ -366,6 +373,14 @@ void Widget::setMotorDirection(bool reverse)
 
 void Widget::sendControl()
 {
+    // 防抖入口:滑块 valueChanged 在拖动中连续触发几十次,不能每次都发。
+    // 记录用户操作时间供 updateStatus 乐观保护,并重启 200ms 合并定时器。
+    lastUserControlMs_ = QDateTime::currentMSecsSinceEpoch();
+    controlDebounceTimer_->start();
+}
+
+void Widget::sendControlNow()
+{
     client_->sendControl(QJsonObject{
         {QStringLiteral("led_on"), ledSwitch_->isChecked() ? 1 : 0},
         {QStringLiteral("led_br"), ledBrightness_->value()},
@@ -393,12 +408,18 @@ void Widget::updateStatus(const QJsonObject &status)
     irLabel_->setText(detected ? QStringLiteral("有人") : QStringLiteral("安全"));
     irLabel_->setStyleSheet(QStringLiteral("color:%1;font-size:16px;font-weight:800;")
                                 .arg(detected ? QStringLiteral("#ef4444") : QStringLiteral("#10b981")));
-    ledSwitch_->setChecked(status.value(QStringLiteral("led_on")).toInt() == 1);
-    motorSwitch_->setChecked(status.value(QStringLiteral("motor_on")).toInt() == 1);
-    buzzerSwitch_->setChecked(status.value(QStringLiteral("buzzer")).toInt() == 1);
-    if (!ledBrightness_->hasFocus()) ledBrightness_->setValue(status.value(QStringLiteral("led_br")).toInt(50));
-    if (!motorSpeed_->hasFocus()) motorSpeed_->setValue(status.value(QStringLiteral("motor_sp")).toInt(30));
-    motorDirection_ = status.value(QStringLiteral("motor_dir")).toInt();
+    // 乐观保护:用户刚操作过控件(1.5s 内),轮询不回写,避免
+    // "刚点击/拖动就被旧缓存拽回"直到单片机回执更新(和 Web 端一致)。
+    const bool skipWriteback =
+        QDateTime::currentMSecsSinceEpoch() - lastUserControlMs_ < 1500;
+    if (!skipWriteback) {
+        ledSwitch_->setChecked(status.value(QStringLiteral("led_on")).toInt() == 1);
+        motorSwitch_->setChecked(status.value(QStringLiteral("motor_on")).toInt() == 1);
+        buzzerSwitch_->setChecked(status.value(QStringLiteral("buzzer")).toInt() == 1);
+        if (!ledBrightness_->hasFocus()) ledBrightness_->setValue(status.value(QStringLiteral("led_br")).toInt(50));
+        if (!motorSpeed_->hasFocus()) motorSpeed_->setValue(status.value(QStringLiteral("motor_sp")).toInt(30));
+        motorDirection_ = status.value(QStringLiteral("motor_dir")).toInt();
+    }
 
     // 新鲜度:优先用后端 last_report(yyyy-MM-dd HH:mm:ss,本地时间);
     // 字段存在但为空/解析失败 → 灰色;字段缺失(旧后端) → 轮询时间兜底。
